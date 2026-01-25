@@ -73,6 +73,7 @@ CONFIG = {
     'management_key': '',
     'usage_snapshot_path': os.path.join(DATA_DIR, 'usage_snapshot.json'),
     'log_stats_path': os.path.join(DATA_DIR, 'log_stats.json'),
+    'persistent_stats_path': os.path.join(DATA_DIR, 'persistent_stats.json'),
     'pricing_input': 0.0,
     'pricing_output': 0.0,
     'pricing_cache': 0.0,
@@ -272,6 +273,101 @@ state = {
 log_lock = threading.Lock()
 log_stats_lock = threading.Lock()
 stats_lock = threading.Lock()
+persistent_stats_lock = threading.Lock()
+
+# ==================== 持久化统计系统 ====================
+PERSISTENT_STATS_FIELDS = (
+    'total_requests',
+    'successful_requests',
+    'failed_requests',
+    'input_tokens',
+    'output_tokens',
+    'cached_tokens',
+    'model_usage',
+)
+
+
+def load_persistent_stats():
+    """从磁盘加载持久化统计数据"""
+    def safe_int(v, default=0):
+        try:
+            return int(v)
+        except:
+            return default
+    
+    path = CONFIG.get('persistent_stats_path')
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False
+        with stats_lock:
+            for key in PERSISTENT_STATS_FIELDS:
+                if key in data:
+                    if key == 'model_usage':
+                        state['stats'][key] = data[key] if isinstance(data[key], dict) else {}
+                    else:
+                        state['stats'][key] = safe_int(data[key])
+            # 同步 request_count
+            state['request_count'] = state['stats']['total_requests']
+        print(f"Loaded persistent stats: {state['stats']['total_requests']} total requests")
+        return True
+    except Exception as e:
+        print(f"Warning: failed to load persistent stats: {e}")
+        return False
+
+
+def save_persistent_stats(force=False):
+    """保存统计数据到磁盘"""
+    path = CONFIG.get('persistent_stats_path')
+    if not path:
+        return False
+    with persistent_stats_lock:
+        now = time.time()
+        # 限制保存频率，除非强制保存
+        last_saved = getattr(save_persistent_stats, '_last_saved', 0)
+        if not force and now - last_saved < 10:
+            return False
+        save_persistent_stats._last_saved = now
+    
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with stats_lock:
+            payload = {
+                'total_requests': state['stats'].get('total_requests', 0),
+                'successful_requests': state['stats'].get('successful_requests', 0),
+                'failed_requests': state['stats'].get('failed_requests', 0),
+                'input_tokens': state['stats'].get('input_tokens', 0),
+                'output_tokens': state['stats'].get('output_tokens', 0),
+                'cached_tokens': state['stats'].get('cached_tokens', 0),
+                'model_usage': dict(state['stats'].get('model_usage', {})),
+                'saved_at': datetime.now().isoformat(),
+            }
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Warning: failed to save persistent stats: {e}")
+        return False
+
+
+def _persistent_stats_worker():
+    """后台线程：定期保存统计数据"""
+    while True:
+        time.sleep(30)  # 每30秒保存一次
+        try:
+            save_persistent_stats()
+        except Exception as e:
+            print(f"Warning: persistent stats worker error: {e}")
+
+
+def start_persistent_stats_worker():
+    """启动持久化统计后台线程"""
+    thread = threading.Thread(target=_persistent_stats_worker, daemon=True)
+    thread.start()
+
 
 # ==================== 缓存系统 ====================
 class CacheManager:
@@ -1901,6 +1997,9 @@ def api_status():
         state['stats']['output_tokens'] = token_totals.get('output_tokens', 0)
         state['stats']['cached_tokens'] = token_totals.get('cached_tokens', 0)
 
+    # 触发持久化保存
+    save_persistent_stats()
+
     return jsonify({
         'service': service,
         'version': {
@@ -2198,6 +2297,9 @@ def api_record_request():
             model = data.get('model', 'unknown')
             state['stats']['model_usage'][model] = state['stats']['model_usage'].get(model, 0) + 1
 
+    # 触发持久化保存（后台线程会定期保存，这里只是触发检查）
+    save_persistent_stats()
+
     return jsonify({'success': True})
 
 @app.route('/api/request-history')
@@ -2463,7 +2565,7 @@ def api_stats():
 
 @app.route('/api/stats/clear', methods=['POST'])
 def api_clear_stats():
-    """清空请求统计（包括日志中的记录）"""
+    """清空请求统计（包括日志中的记录和持久化文件）"""
     with stats_lock:
         state['stats']['total_requests'] = 0
         state['stats']['successful_requests'] = 0
@@ -2475,6 +2577,9 @@ def api_clear_stats():
         state['stats']['error_types'].clear()
         state['request_log'].clear()
         state['request_count'] = 0
+
+    # 保存清空后的状态到持久化文件
+    save_persistent_stats(force=True)
 
     # 清空日志文件中的请求记录
     log_file = CONFIG['cliproxy_log']
@@ -2712,6 +2817,9 @@ def background_tasks():
 if __name__ == '__main__':
     state['current_version'] = get_current_commit()
 
+    # 加载持久化统计数据（最重要的，放在最前面）
+    load_persistent_stats()
+
     load_log_stats_state()
     try:
         get_request_count_from_logs()
@@ -2732,6 +2840,9 @@ if __name__ == '__main__':
 
     # 启动 usage 持久化线程
     start_usage_snapshot_worker()
+
+    # 启动统计数据持久化线程
+    start_persistent_stats_worker()
 
     # 预加载语录并做数量检查
     quotes = load_quotes()
