@@ -1,6 +1,10 @@
 # CPA-XXX 管理面板
+（本面板完全是vibe coding的产物。初期构建由opus-4.5完成，后续修改更新由gpt5.2-codex-high完成）
 
-一个用于 **CLIProxyAPI** 的监控与管理面板，支持健康检查、资源监控、日志查看、更新管理、请求统计与定价显示等功能。
+一个用于 **CLIProxyAPI** 的监控与管理面板，浅色深色双主题，支持健康检查、资源监控、日志查看、更新管理、请求统计与定价显示等功能。
+<img width="2555" height="1230" alt="CPA-XXX" src="https://github.com/user-attachments/assets/07a2ed19-7a93-4e43-9057-3d12f1737188" />
+<img width="2554" height="1228" alt="CPA-XXX-2" src="https://github.com/user-attachments/assets/0b1d502f-e66d-4a73-a55e-b50c4e6bf760" />
+
 
 ## 适用环境
 - **推荐：Linux**（面板含 `systemctl` 相关功能）
