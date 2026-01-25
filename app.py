@@ -250,6 +250,24 @@ state = {
         'error_types': {},
         'hourly_stats': deque(maxlen=24),
     },
+    # 上次从 CLIProxyAPI 读取的快照值（用于计算增量）
+    'last_snapshot': {
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'cached_tokens': 0,
+        'total_requests': 0,
+        'success': 0,
+        'failure': 0,
+    },
+    # 面板独立累加的统计数据（持久化保存，不受 CLIProxyAPI 重启影响）
+    'accumulated_stats': {
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'cached_tokens': 0,
+        'total_requests': 0,
+        'success': 0,
+        'failure': 0,
+    },
     'last_health_check': None,
     'health_status': 'unknown',
     'log_stats': {
@@ -310,9 +328,19 @@ def load_persistent_stats():
                         state['stats'][key] = data[key] if isinstance(data[key], dict) else {}
                     else:
                         state['stats'][key] = safe_int(data[key])
+            # 加载累计统计值
+            if 'accumulated_stats' in data and isinstance(data['accumulated_stats'], dict):
+                for key in state['accumulated_stats']:
+                    if key in data['accumulated_stats']:
+                        state['accumulated_stats'][key] = safe_int(data['accumulated_stats'][key])
+            # 加载上次快照值
+            if 'last_snapshot' in data and isinstance(data['last_snapshot'], dict):
+                for key in state['last_snapshot']:
+                    if key in data['last_snapshot']:
+                        state['last_snapshot'][key] = safe_int(data['last_snapshot'][key])
             # 同步 request_count
             state['request_count'] = state['stats']['total_requests']
-        print(f"Loaded persistent stats: {state['stats']['total_requests']} total requests")
+        print(f"Loaded persistent stats: accumulated={state['accumulated_stats']}, last_snapshot={state['last_snapshot']}")
         return True
     except Exception as e:
         print(f"Warning: failed to load persistent stats: {e}")
@@ -343,6 +371,8 @@ def save_persistent_stats(force=False):
                 'output_tokens': state['stats'].get('output_tokens', 0),
                 'cached_tokens': state['stats'].get('cached_tokens', 0),
                 'model_usage': dict(state['stats'].get('model_usage', {})),
+                'accumulated_stats': dict(state.get('accumulated_stats', {})),
+                'last_snapshot': dict(state.get('last_snapshot', {})),
                 'saved_at': datetime.now().isoformat(),
             }
         with open(path, 'w', encoding='utf-8') as f:
@@ -1990,15 +2020,104 @@ def api_status():
         'output': _safe_float(CONFIG.get('pricing_output', 0.0)),
         'cache': _safe_float(CONFIG.get('pricing_cache', 0.0)),
     }
-    usage_costs = compute_usage_costs(token_totals, pricing)
+
+    # 获取当前 CLIProxyAPI 的值
+    current_input = token_totals.get('input_tokens', 0)
+    current_output = token_totals.get('output_tokens', 0)
+    current_cached = token_totals.get('cached_tokens', 0)
+    current_requests = usage_reqs.get('total_requests', 0) or 0
+    current_success = usage_reqs.get('success', 0) or 0
+    current_failure = usage_reqs.get('failure', 0) or 0
+
+    # 获取上次快照值
+    last = state.get('last_snapshot', {})
+    last_input = last.get('input_tokens', 0)
+    last_output = last.get('output_tokens', 0)
+    last_cached = last.get('cached_tokens', 0)
+    last_requests = last.get('total_requests', 0)
+    last_success = last.get('success', 0)
+    last_failure = last.get('failure', 0)
+
+    # 计算增量（如果当前值 < 上次值，说明 CLIProxyAPI 重启了，增量就是当前值）
+    if current_input >= last_input:
+        delta_input = current_input - last_input
+    else:
+        delta_input = current_input  # CLIProxyAPI 重启了
+    
+    if current_output >= last_output:
+        delta_output = current_output - last_output
+    else:
+        delta_output = current_output
+    
+    if current_cached >= last_cached:
+        delta_cached = current_cached - last_cached
+    else:
+        delta_cached = current_cached
+    
+    if current_requests >= last_requests:
+        delta_requests = current_requests - last_requests
+    else:
+        delta_requests = current_requests
+    
+    if current_success >= last_success:
+        delta_success = current_success - last_success
+    else:
+        delta_success = current_success
+    
+    if current_failure >= last_failure:
+        delta_failure = current_failure - last_failure
+    else:
+        delta_failure = current_failure
+
+    # 累加到面板的统计数据
+    acc = state.get('accumulated_stats', {})
+    acc['input_tokens'] = acc.get('input_tokens', 0) + delta_input
+    acc['output_tokens'] = acc.get('output_tokens', 0) + delta_output
+    acc['cached_tokens'] = acc.get('cached_tokens', 0) + delta_cached
+    acc['total_requests'] = acc.get('total_requests', 0) + delta_requests
+    acc['success'] = acc.get('success', 0) + delta_success
+    acc['failure'] = acc.get('failure', 0) + delta_failure
+    state['accumulated_stats'] = acc
+
+    # 更新上次快照值
+    state['last_snapshot'] = {
+        'input_tokens': current_input,
+        'output_tokens': current_output,
+        'cached_tokens': current_cached,
+        'total_requests': current_requests,
+        'success': current_success,
+        'failure': current_failure,
+    }
+
+    # 使用累计值作为显示值
+    display_input_tokens = acc['input_tokens']
+    display_output_tokens = acc['output_tokens']
+    display_cached_tokens = acc['cached_tokens']
+    display_total_tokens = display_input_tokens + display_output_tokens + display_cached_tokens
+    display_total_requests = acc['total_requests']
+    display_success = acc['success']
+    display_failure = acc['failure']
+
+    # 使用显示值计算费用
+    display_token_totals = {
+        'input_tokens': display_input_tokens,
+        'output_tokens': display_output_tokens,
+        'cached_tokens': display_cached_tokens,
+    }
+    usage_costs = compute_usage_costs(display_token_totals, pricing)
 
     with stats_lock:
-        state['stats']['input_tokens'] = token_totals.get('input_tokens', 0)
-        state['stats']['output_tokens'] = token_totals.get('output_tokens', 0)
-        state['stats']['cached_tokens'] = token_totals.get('cached_tokens', 0)
+        state['stats']['input_tokens'] = display_input_tokens
+        state['stats']['output_tokens'] = display_output_tokens
+        state['stats']['cached_tokens'] = display_cached_tokens
 
     # 触发持久化保存
     save_persistent_stats()
+
+    # 如果没有从 API 获取到请求数，使用日志统计
+    final_count = display_total_requests if display_total_requests > 0 else log_requests.get('count', 0)
+    final_success = display_success if display_success > 0 else log_requests.get('success', 0)
+    final_failed = display_failure if display_failure > 0 else log_requests.get('failed', 0)
 
     return jsonify({
         'service': service,
@@ -2008,15 +2127,15 @@ def api_status():
             'has_update': state['current_version'] != state['latest_version']
         },
         'requests': {
-            'count': usage_reqs.get('total_requests') or log_requests.get('count'),
+            'count': final_count,
             'last_time': log_requests.get('last_time'),
-            'success': usage_reqs.get('success') or log_requests.get('success', 0),
-            'failed': usage_reqs.get('failure') or log_requests.get('failed', 0),
+            'success': final_success,
+            'failed': final_failed,
             'is_idle': is_idle(),
-            'input_tokens': token_totals.get('input_tokens', 0),
-            'output_tokens': token_totals.get('output_tokens', 0),
-            'cached_tokens': token_totals.get('cached_tokens', 0),
-            'total_tokens': token_totals.get('total_tokens', 0),
+            'input_tokens': display_input_tokens,
+            'output_tokens': display_output_tokens,
+            'cached_tokens': display_cached_tokens,
+            'total_tokens': display_total_tokens,
         },
         'update': {
             'in_progress': state['update_in_progress'],
@@ -2565,7 +2684,31 @@ def api_stats():
 
 @app.route('/api/stats/clear', methods=['POST'])
 def api_clear_stats():
-    """清空请求统计（包括日志中的记录和持久化文件）"""
+    """清空请求统计（清空累计值，更新快照为当前值）"""
+    # 先获取当前 CLIProxyAPI 的值，作为新的快照起点
+    snapshot = fetch_usage_snapshot(use_cache=False)
+    token_totals, usage_reqs = aggregate_usage_snapshot(snapshot)
+
+    # 更新快照为当前值（这样下次计算增量时从0开始）
+    state['last_snapshot'] = {
+        'input_tokens': token_totals.get('input_tokens', 0),
+        'output_tokens': token_totals.get('output_tokens', 0),
+        'cached_tokens': token_totals.get('cached_tokens', 0),
+        'total_requests': usage_reqs.get('total_requests', 0) or 0,
+        'success': usage_reqs.get('success', 0) or 0,
+        'failure': usage_reqs.get('failure', 0) or 0,
+    }
+
+    # 清空累计统计值
+    state['accumulated_stats'] = {
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'cached_tokens': 0,
+        'total_requests': 0,
+        'success': 0,
+        'failure': 0,
+    }
+
     with stats_lock:
         state['stats']['total_requests'] = 0
         state['stats']['successful_requests'] = 0
@@ -2581,6 +2724,20 @@ def api_clear_stats():
     # 保存清空后的状态到持久化文件
     save_persistent_stats(force=True)
 
+    # 清空 usage_snapshot.json
+    usage_path = CONFIG.get('usage_snapshot_path')
+    if usage_path and os.path.exists(usage_path):
+        try:
+            os.remove(usage_path)
+        except Exception as e:
+            print(f"Error removing usage snapshot: {e}")
+
+    # 清除所有缓存
+    try:
+        cache._cache.clear()
+    except Exception:
+        pass
+
     # 清空日志文件中的请求记录
     log_file = CONFIG['cliproxy_log']
     try:
@@ -2593,11 +2750,6 @@ def api_clear_stats():
             with open(log_file, 'w', encoding='utf-8') as f:
                 f.write('')
             _reset_log_stats_state()
-            # 清除缓存
-            try:
-                cache._cache.pop('request_count_logs', None)
-            except:
-                pass
     except Exception as e:
         print(f"Error clearing log file: {e}")
 

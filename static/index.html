@@ -1702,12 +1702,17 @@
 
         async function clearStats() {
             if (!confirm('确定要清空所有请求统计数据吗？')) return;
-            const r = await api('/api/stats/clear', { method: 'POST' });
-            if (r?.success) {
-                toast('统计数据已清空', 'success');
-                refreshStatus();
-            } else {
-                toast('清空失败: ' + (r?.message || '未知错误'), 'error');
+            try {
+                const r = await api('/api/stats/clear', { method: 'POST' });
+                if (r && r.success) {
+                    toast('统计数据已清空', 'success');
+                    refreshStatus();
+                } else {
+                    toast('清空失败: ' + (r && r.message ? r.message : '未知错误'), 'error');
+                }
+            } catch (e) {
+                console.error('clearStats error:', e);
+                toast('清空失败: ' + e.message, 'error');
             }
         }
 
