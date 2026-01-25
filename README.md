@@ -2,7 +2,12 @@
 
 English | [中文](README_CN.md)
 
-A monitoring and management panel for **CLIProxyAPI**, featuring health checks, resource monitoring, log viewing, update management, request statistics, and pricing display.
+(This panel is entirely a product of vibe coding. Initial build by opus-4.5, subsequent updates by gpt5.2-codex-high)
+
+A monitoring and management panel for **CLIProxyAPI**, with light/dark dual themes, featuring health checks, resource monitoring, log viewing, update management, request statistics, and pricing display.
+
+<img width="2555" height="1230" alt="CPA-XXX" src="https://github.com/user-attachments/assets/07a2ed19-7a93-4e43-9057-3d12f1737188" />
+<img width="2554" height="1228" alt="CPA-XXX-2" src="https://github.com/user-attachments/assets/0b1d502f-e66d-4a73-a55e-b50c4e6bf760" />
 
 ## Requirements
 - **Recommended: Linux** (panel includes `systemctl` functionality)
