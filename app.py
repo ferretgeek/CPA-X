@@ -2817,8 +2817,13 @@ def background_tasks():
 if __name__ == '__main__':
     state['current_version'] = get_current_commit()
 
+    # 确保 data 目录存在
+    os.makedirs(DATA_DIR, exist_ok=True)
+
     # 加载持久化统计数据（最重要的，放在最前面）
     load_persistent_stats()
+    # 立即保存一次，确保文件存在
+    save_persistent_stats(force=True)
 
     load_log_stats_state()
     try:
