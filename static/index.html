@@ -1181,7 +1181,11 @@
                         <div class="card-icon purple" style="width:28px;height:28px;"><svg viewBox="0 0 24 24" style="width:16px;height:16px;"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM4 12h4v2H4v-2zm10 6H4v-2h10v2zm6 0h-4v-2h4v2zm0-4H10v-2h10v2z"/></svg></div>
                         CLIProxy 日志
                     </div>
-                    <div style="display:flex;gap:6px;">
+                    <div style="display:flex;gap:6px;align-items:center;">
+                        <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);cursor:pointer;" title="隐藏来自 127.0.0.1 的请求日志">
+                            <input type="checkbox" id="hide-localhost" checked onchange="saveLogFilter();refreshCliLogs();" style="cursor:pointer;">
+                            <span>屏蔽本地</span>
+                        </label>
                         <button class="btn btn-ghost btn-sm" onclick="clearLogDisplay()" title="清空显示">清空</button>
                         <button class="btn btn-ghost btn-sm" onclick="refreshCliLogs()">刷新</button>
                     </div>
@@ -1242,6 +1246,26 @@
         };
         let pricingDirty = false;
         let pricingInitialized = false;
+
+        // 日志过滤设置
+        function initLogFilter() {
+            const saved = localStorage.getItem('hideLocalhost');
+            // 默认开启（saved 为 null 或 'true' 时都开启）
+            const hide = saved === null || saved === 'true';
+            document.getElementById('hide-localhost').checked = hide;
+        }
+
+        function saveLogFilter() {
+            const hide = document.getElementById('hide-localhost').checked;
+            localStorage.setItem('hideLocalhost', hide ? 'true' : 'false');
+        }
+
+        function shouldHideLog(message) {
+            const hide = document.getElementById('hide-localhost').checked;
+            if (!hide) return false;
+            // 匹配 127.0.0.1 的日志
+            return /127\.0\.0\.1/.test(message);
+        }
 
         // 主题
         function initTheme() {
@@ -1845,7 +1869,16 @@
                 return;
             }
 
-            el.innerHTML = d.logs.slice(-30).map(l => {
+            // 过滤掉 127.0.0.1 的日志（如果开关开启）
+            const filteredLogs = d.logs.filter(l => !shouldHideLog(l.message));
+            
+            if (!filteredLogs.length) {
+                el.innerHTML = '<div class="log-entry"><span class="log-msg">暂无日志（已过滤本地请求）</span></div>';
+                inflight.refreshCliLogs = false;
+                return;
+            }
+
+            el.innerHTML = filteredLogs.slice(-30).map(l => {
                 // 解析状态码来决定颜色
                 let logClass = '';
                 let statusHtml = '';
@@ -2120,6 +2153,7 @@
 
         // 初始化
         initTheme();
+        initLogFilter();
         initQuote();
         initPricingInputs();
         refreshAll();
