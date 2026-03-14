@@ -45,6 +45,18 @@ systemctl restart cliproxy-panel
 2) 面板 → 文件路径（可选但强烈建议）  
    - 如果你希望“日志/配置/auth 文件列表”等功能正常：把宿主机的 `config.yaml`、`main.log`、`auth_dir` 挂载到容器，并把环境变量指向容器内路径（例如 `/mnt/cliproxy/...`）
 
+## 1.2) 非 systemd 部署（例如 nohup/supervisor/pm2）
+
+如果目标机器没有 systemd（或你不想装 systemd 服务），面板仍可运行，但会有功能差异：
+
+- 仍可用：页面、状态、统计、模型、日志/配置读取（前提是 `.env` 中路径与上游地址正确）
+- 不可用/受限：`systemctl` 相关的服务控制；自动更新通常不可用（建议设置 `CLIPROXY_PANEL_AUTO_UPDATE_ENABLED=false`）
+
+推荐最小启动方式：
+
+- 用虚拟环境运行：`.venv/bin/python app.py`
+- 后台守护：建议交给 supervisor/pm2 等进程管理器（由你的环境决定）
+
 ## 2) doctor：自动探测并生成 .env
 
 `scripts/doctor.py` 会尝试：

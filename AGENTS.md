@@ -33,6 +33,13 @@
 - `docker-compose.yml`
 - `.env.docker.example`
 
+## 1.2) 其他部署方式（无 systemd）
+
+如果目标环境没有 systemd（或你不想安装服务），可以直接运行面板进程，但自动更新/服务控制会受限：
+
+- 直接运行：`python3 app.py`（或用虚拟环境：`.venv/bin/python app.py`）
+- 建议：使用 supervisor/pm2 等进程管理器做守护重启（由环境决定）
+
 ## 2) 你必须知道/补齐的“密钥”
 
 自动探测无法凭空得到明文密钥（因为 CLIProxyAPI 配置里通常存的是 hash）。
