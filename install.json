@@ -4,11 +4,18 @@
   "language": "python",
   "entrypoint": "app.py",
   "env_example": ".env.example",
+  "env_examples": [".env.example", ".env.docker.example"],
   "ports": [8080],
   "healthcheck": {
     "path": "/api/resources",
     "method": "GET",
     "timeout_seconds": 5
+  },
+  "docker": {
+    "dockerfile": "Dockerfile",
+    "compose": "docker-compose.yml",
+    "env_example": ".env.docker.example",
+    "notes": "Container mode is good for monitoring; auto-update/service control (systemd) is typically unavailable."
   },
   "install": {
     "venv_dir": ".venv",

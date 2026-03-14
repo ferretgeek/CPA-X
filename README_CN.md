@@ -75,6 +75,23 @@ python app.py
 http://127.0.0.1:8080
 ```
 
+## Docker/容器部署（可选）
+
+适用场景：你只需要“监控与查看”（状态/统计/模型/日志/配置读取）。  
+不适用场景：你需要“自动更新/服务控制”（容器里通常没有 systemd，默认做不了）。
+
+仓库已提供：
+- `Dockerfile`
+- `docker-compose.yml`
+- `.env.docker.example`
+
+最短路径（推荐用 compose）：
+```bash
+docker compose up -d --build
+```
+
+如需“日志/配置/auth 文件”等功能，请按 `docker-compose.yml` 的注释挂载宿主机文件/目录，并把相关 `CLIPROXY_PANEL_*` 环境变量改成容器内路径。
+
 ## 常见问题
 ### 1) 页面能打开但数据为空
 检查 CLIProxy 是否在运行，并确认 `.env` 中的 `CLIPROXY_PANEL_CLIPROXY_API_BASE/PORT` 指向正确。
