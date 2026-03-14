@@ -462,6 +462,14 @@ class CacheManager:
         with self._lock:
             self._cache[key] = (value, time.time())
 
+    def invalidate(self, key=None):
+        """使缓存失效（key=None 表示清空全部）"""
+        with self._lock:
+            if key is None:
+                self._cache.clear()
+            else:
+                self._cache.pop(key, None)
+
 
 def _safe_int(value, default=0):
     try:
@@ -722,7 +730,8 @@ def compute_usage_costs(tokens, pricing):
     billable_input_tokens = max(input_tokens - cached_tokens, 0)
 
     input_cost = billable_input_tokens / 1_000_000 * input_price
-    output_cost = tokens.get('output_tokens', 0) / 1_000_000 * output_price
+    output_tokens = _safe_int(tokens.get('output_tokens', 0))
+    output_cost = output_tokens / 1_000_000 * output_price
     cache_cost = cached_tokens / 1_000_000 * cache_price
     total_cost = input_cost + output_cost + cache_cost
 
@@ -1059,14 +1068,6 @@ def get_random_quote():
     import random
     return random.choice(cached)
 
-    def invalidate(self, key=None):
-        """使缓存失效"""
-        with self._lock:
-            if key:
-                self._cache.pop(key, None)
-            else:
-                self._cache.clear()
-
 cache = CacheManager()
 
 # ==================== 后台资源监控 ====================
@@ -1136,14 +1137,22 @@ def get_service_status(use_cache=True):
     is_running = False
 
     if is_linux() and command_available('systemctl'):
-        success, stdout, _ = run_cmd(f'systemctl is-active {CONFIG["cliproxy_service"]}')
+        service_name = CONFIG.get("cliproxy_service")
+        success, stdout, _ = run_cmd(f'systemctl is-active {service_name}')
         is_running = success and stdout == 'active'
-        _, status_out, _ = run_cmd(f'systemctl status {CONFIG["cliproxy_service"]} --no-pager -l 2>/dev/null | head -20')
+        _, status_out, _ = run_cmd(f'systemctl status {service_name} --no-pager -l 2>/dev/null | head -20')
+        # 尽量用 systemd 的 MainPID（比 pgrep 更准确，且不依赖进程名）
+        ok_pid, pid_value, _ = run_cmd(f'systemctl show {service_name} -p MainPID --value 2>/dev/null')
+        if ok_pid:
+            pid_value = (pid_value or '').strip()
+            if pid_value and pid_value != '0':
+                pid_out = pid_value
     else:
         status_out = 'Not supported on this platform'
 
-    if command_available('pgrep'):
-        _, pid_out, _ = run_cmd('pgrep -f "cliproxy -config" | head -1')
+    # fallback：没有 systemd 或无法获取 MainPID 时再尝试 pgrep
+    if not pid_out and command_available('pgrep'):
+        _, pid_out, _ = run_cmd('pgrep -f "cli-proxy-api|cliproxyapi|cliproxy" | head -1')
 
     memory = 'N/A'
     cpu = 'N/A'
@@ -1807,10 +1816,10 @@ def perform_update():
             print(f"Failed to record update history: {e}")
         # 清除版本缓存
         try:
-            cache._cache.pop('local_version', None)
-            cache._cache.pop('github_release', None)
-            cache._cache.pop('update_check', None)
-        except:
+            cache.invalidate('local_version')
+            cache.invalidate('github_release')
+            cache.invalidate('update_check')
+        except Exception:
             pass
 
         return True, result
@@ -1944,10 +1953,14 @@ def update_from_github_release(binary_path=''):
                 def _safe_extract(tar, target_dir):
                     target_dir_abs = os.path.abspath(target_dir)
                     for member in tar.getmembers():
+                        # 防御更严格：拒绝符号链接/硬链接，避免“先解出链接再写文件”绕过路径校验
+                        if getattr(member, 'issym', lambda: False)() or getattr(member, 'islnk', lambda: False)():
+                            raise RuntimeError(f'Unsafe link in tar: {member.name}')
                         member_path = os.path.abspath(os.path.join(target_dir_abs, member.name))
                         if not member_path.startswith(target_dir_abs + os.sep) and member_path != target_dir_abs:
                             raise RuntimeError(f'Unsafe path in tar: {member.name}')
-                    tar.extractall(target_dir_abs)
+                    for member in tar.getmembers():
+                        tar.extract(member, target_dir_abs)
 
                 with tarfile.open(tar_path, 'r:gz') as tf:
                     _safe_extract(tf, tmpdir)
@@ -2850,8 +2863,8 @@ def api_clear_cliproxy_logs():
 
     _reset_log_stats_state()
     try:
-        cache._cache.pop('request_count_logs', None)
-    except:
+        cache.invalidate('request_count_logs')
+    except Exception:
         pass
 
     if errors:
@@ -3422,7 +3435,7 @@ def api_clear_stats():
 
     # 清除所有缓存
     try:
-        cache._cache.clear()
+        cache.invalidate()
     except Exception:
         pass
 

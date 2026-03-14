@@ -32,7 +32,7 @@ def install_requirements(project_root: Path, venv_py: str):
     run([venv_py, "-m", "pip", "install", "-r", "requirements.txt"], cwd=str(project_root))
 
 
-def ensure_env(project_root: Path):
+def ensure_env(project_root: Path, venv_py: str):
     env_file = project_root / ".env"
     example = project_root / ".env.example"
     if not env_file.exists() and example.exists():
@@ -42,8 +42,9 @@ def ensure_env(project_root: Path):
     doctor = project_root / "scripts" / "doctor.py"
     if doctor.exists():
         try:
+            python_bin = venv_py if venv_py and Path(venv_py).exists() else sys.executable
             subprocess.run(
-                [sys.executable, str(doctor), "--write-env", f"--env-path={env_file}"],
+                [python_bin, str(doctor), "--write-env", f"--env-path={env_file}"],
                 cwd=str(project_root),
                 check=False,
             )
@@ -103,7 +104,7 @@ def main():
     venv_dir = ensure_venv(project_root, python_bin)
     venv_py = venv_python(venv_dir, is_windows)
     install_requirements(project_root, venv_py)
-    ensure_env(project_root)
+    ensure_env(project_root, venv_py)
 
     if not is_windows and args.install_service:
         if hasattr(os, "geteuid") and os.geteuid() != 0:
