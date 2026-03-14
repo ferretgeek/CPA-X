@@ -859,10 +859,10 @@
                                 <div class="req-summary-number count" id="req-count">0</div>
                                 <div class="req-summary-label">总请求数</div>
                             </div>
-                            <div class="req-summary-item">
-                                <div class="req-summary-number tokens" id="req-total-tokens">-</div>
-                                <div class="req-summary-label">百万Tokens</div>
-                            </div>
+	                            <div class="req-summary-item">
+	                                <div class="req-summary-number tokens" id="req-total-tokens">-</div>
+	                                <div class="req-summary-label" id="req-total-tokens-unit">百万Tokens</div>
+	                            </div>
                             <div class="req-summary-item">
                                 <div class="req-summary-number cost" id="req-total-cost">-</div>
                                 <div class="req-summary-label">美元</div>
@@ -890,13 +890,21 @@
                                 <div class="req-cost-value" style="text-align:right;" id="req-cache-cost">-</div>
                             </div>
                         </div>
-                        <div class="req-section pricing-compact">
-                            <div class="health-pricing-title">Token 价格设置（输入/输出/缓存）</div>
-                            <div class="pricing-grid">
-                                <input type="number" id="pricing-input" class="input" placeholder="输入" step="0.001" min="0">
-                                <input type="number" id="pricing-output" class="input" placeholder="输出" step="0.001" min="0">
-                                <input type="number" id="pricing-cache" class="input" placeholder="缓存" step="0.001" min="0">
-                            </div>
+	                        <div class="req-section pricing-compact">
+	                            <div class="health-pricing-title">Token 价格设置（输入/输出/缓存）</div>
+	                            <div class="info-row" style="margin-top:6px;">
+	                                <span class="info-label">自动同步价格</span>
+	                                <div style="display:flex;align-items:center;gap:8px;">
+	                                    <span id="pricing-auto-label" style="font-size:11px;color:var(--text-muted);">-</span>
+	                                    <div id="pricing-auto-switch" class="switch" onclick="togglePricingAuto()"></div>
+	                                </div>
+	                            </div>
+	                            <div id="pricing-source-info" style="font-size:10px;color:var(--text-muted);margin-top:4px;">来源：-</div>
+	                            <div class="pricing-grid">
+	                                <input type="number" id="pricing-input" class="input" placeholder="输入" step="0.001" min="0">
+	                                <input type="number" id="pricing-output" class="input" placeholder="输出" step="0.001" min="0">
+	                                <input type="number" id="pricing-cache" class="input" placeholder="缓存" step="0.001" min="0">
+	                            </div>
                             <div class="btn-group" style="margin-top:4px;">
                                 <button class="btn btn-ghost btn-sm" onclick="savePricing()" style="flex:1;">保存价格</button>
                             </div>
@@ -1250,6 +1258,7 @@
         };
         let pricingDirty = false;
         let pricingInitialized = false;
+        let updateSettingsDirty = false;
 
         // 日志过滤设置
         function initLogFilter() {
@@ -1343,15 +1352,25 @@
 	            } catch (e) {}
 	        }
 
-        function formatMillionTokens(value) {
-            const num = Number(value || 0);
-            const formatted = (num / 1000000).toFixed(2);
-            return `<span class="req-token-number">${formatted}</span>&nbsp;&nbsp;<span class="req-token-unit">百万Tokens</span>`;
+        function pickTokenUnit(value) {
+            const num = Math.max(0, Number(value || 0));
+            // 需求：随数值变大自动切换（百万 -> 千万 -> 亿；超过亿后固定用“亿”）
+            if (num >= 100000000) return { scale: 100000000, unit: '亿Tokens' };
+            if (num >= 10000000) return { scale: 10000000, unit: '千万Tokens' };
+            return { scale: 1000000, unit: '百万Tokens' };
         }
 
-        function formatMillionShort(value) {
+        function formatTokens(value, decimals = 2) {
             const num = Number(value || 0);
-            return `${(num / 1000000).toFixed(1)}`;
+            const { scale, unit } = pickTokenUnit(num);
+            const formatted = (num / scale).toFixed(decimals);
+            return `<span class="req-token-number">${formatted}</span>&nbsp;&nbsp;<span class="req-token-unit">${unit}</span>`;
+        }
+
+        function formatTokensShort(value, decimals = 1) {
+            const num = Number(value || 0);
+            const { scale } = pickTokenUnit(num);
+            return `${(num / scale).toFixed(decimals)}`;
         }
 
         function formatUsd(value) {
@@ -1525,6 +1544,16 @@
             });
         }
 
+        function initUpdateSettingsInputs() {
+            ['idle-input', 'check-interval-input'].forEach((id) => {
+                const input = document.getElementById(id);
+                if (!input) return;
+                input.addEventListener('input', () => { updateSettingsDirty = true; });
+                input.addEventListener('change', () => { updateSettingsDirty = true; });
+                input.addEventListener('focus', () => { updateSettingsDirty = true; });
+            });
+        }
+
         // 从面板后端获取模型列表
         async function loadModelsFromAPI() {
             if (inflight.loadModelsFromAPI) return;
@@ -1653,10 +1682,12 @@
             const outputTokens = d.requests.output_tokens || 0;
             const cacheTokens = d.requests.cached_tokens || 0;
             const totalTokens = d.requests.total_tokens || (inputTokens + outputTokens);
-            document.getElementById('req-input-tokens').innerHTML = `输入：${formatMillionTokens(inputTokens)}`;
-            document.getElementById('req-output-tokens').innerHTML = `输出：${formatMillionTokens(outputTokens)}`;
-            document.getElementById('req-cache-tokens').innerHTML = `缓存：${formatMillionTokens(cacheTokens)}`;
-            document.getElementById('req-total-tokens').textContent = formatMillionShort(totalTokens);
+            document.getElementById('req-input-tokens').innerHTML = `输入：${formatTokens(inputTokens)}`;
+            document.getElementById('req-output-tokens').innerHTML = `输出：${formatTokens(outputTokens)}`;
+            document.getElementById('req-cache-tokens').innerHTML = `缓存：${formatTokens(cacheTokens)}`;
+            document.getElementById('req-total-tokens').textContent = formatTokensShort(totalTokens);
+            const unitEl = document.getElementById('req-total-tokens-unit');
+            if (unitEl) unitEl.textContent = pickTokenUnit(totalTokens).unit;
 
             if (d.usage_costs) {
                 document.getElementById('req-input-cost').innerHTML = formatUsd(d.usage_costs.input || 0);
@@ -1669,24 +1700,70 @@
             applySummarySizing(document.getElementById('req-total-tokens'));
             applySummarySizing(document.getElementById('req-total-cost'));
 
-            if (d.pricing) {
-                if (!pricingDirty) {
-                    setPricingValue('pricing-input', d.pricing.input);
-                    setPricingValue('pricing-output', d.pricing.output);
-                    setPricingValue('pricing-cache', d.pricing.cache);
-                }
-                pricingInitialized = true;
-            }
+	            if (d.pricing) {
+	                if (!pricingDirty) {
+	                    setPricingValue('pricing-input', d.pricing.input);
+	                    setPricingValue('pricing-output', d.pricing.output);
+	                    setPricingValue('pricing-cache', d.pricing.cache);
+	                }
+	                pricingInitialized = true;
+	            }
+	            // 价格自动同步状态与来源信息
+	            const pmeta = d.pricing_meta || {};
+	            const pricingAutoEnabled = !!pmeta.auto_enabled;
+	            const pSw = document.getElementById('pricing-auto-switch');
+	            const pLabel = document.getElementById('pricing-auto-label');
+	            if (pSw && pLabel) {
+	                if (pricingAutoEnabled) {
+	                    pSw.classList.add('on');
+	                    pLabel.textContent = '已开启';
+	                } else {
+	                    pSw.classList.remove('on');
+	                    pLabel.textContent = '已关闭';
+	                }
+	            }
+	            const pInfo = document.getElementById('pricing-source-info');
+	            if (pInfo) {
+	                const mode = pmeta.mode || (pricingAutoEnabled ? 'auto' : 'manual');
+	                const src = pmeta.source || (pricingAutoEnabled ? (pmeta.auto_source || 'openrouter') : 'manual');
+	                const model = pmeta.model || pmeta.auto_model || '';
+	                if (!pricingAutoEnabled) {
+	                    pInfo.textContent = '来源：手动（自动同步已关闭）';
+	                } else if (mode === 'manual') {
+	                    pInfo.textContent = '来源：手动（自动同步已开启）';
+	                } else if (mode === 'mixed') {
+	                    pInfo.textContent = `来源：混合（${src}${model ? '：' + model : ''}；手动值优先）`;
+	                } else {
+	                    pInfo.textContent = `来源：${src}${model ? '：' + model : ''}`;
+	                }
+	            }
 
             // 自动更新开关
             const sw = document.getElementById('auto-switch');
             const label = document.getElementById('auto-label');
             if (d.update.auto_enabled) { sw.classList.add('on'); label.textContent = '已开启'; }
             else { sw.classList.remove('on'); label.textContent = '已关闭'; }
-            document.getElementById('idle-input').value = Math.round(d.config.idle_threshold / 60);
-            // 检查间隔 (如果后端支持)
-            if (d.config.check_interval) {
-                document.getElementById('check-interval-input').value = Math.round(d.config.check_interval / 60);
+            // 自动更新配置（避免每 5 秒刷新把用户正在输入的值“打回原值”）
+            const idleInputEl = document.getElementById('idle-input');
+            const checkIntervalEl = document.getElementById('check-interval-input');
+            const editingIdle = document.activeElement === idleInputEl;
+            const editingCheck = document.activeElement === checkIntervalEl;
+            if (!updateSettingsDirty && !editingIdle && idleInputEl && typeof d.config.idle_threshold === 'number') {
+                idleInputEl.value = Math.round(d.config.idle_threshold / 60);
+            }
+            if (!updateSettingsDirty && !editingCheck && checkIntervalEl && typeof d.config.check_interval === 'number') {
+                checkIntervalEl.value = Math.round(d.config.check_interval / 60);
+            }
+            // 如果用户输入的值与后端一致，则自动解除 dirty，恢复后端刷新
+            if (updateSettingsDirty && !editingIdle && !editingCheck && idleInputEl && checkIntervalEl
+                && typeof d.config.idle_threshold === 'number' && typeof d.config.check_interval === 'number') {
+                const idleLocal = parseInt(idleInputEl.value || '0', 10);
+                const checkLocal = parseInt(checkIntervalEl.value || '0', 10);
+                const idleServer = Math.round(d.config.idle_threshold / 60);
+                const checkServer = Math.round(d.config.check_interval / 60);
+                if (!isNaN(idleLocal) && !isNaN(checkLocal) && idleLocal === idleServer && checkLocal === checkServer) {
+                    updateSettingsDirty = false;
+                }
             }
 
             // 健康状态
@@ -2038,15 +2115,31 @@
             setTimeout(refreshStatus, 3000);
         }
 
-        async function toggleAutoUpdate() {
-            const sw = document.getElementById('auto-switch');
-            const on = sw.classList.contains('on');
-            const r = await api('/api/config/auto-update', { method: 'POST', body: JSON.stringify({ enabled: !on }) });
-            if (r?.success) {
-                sw.classList.toggle('on');
-                document.getElementById('auto-label').textContent = sw.classList.contains('on') ? '已开启' : '已关闭';
-            }
-        }
+	        async function toggleAutoUpdate() {
+	            const sw = document.getElementById('auto-switch');
+	            const on = sw.classList.contains('on');
+	            const r = await api('/api/config/auto-update', { method: 'POST', body: JSON.stringify({ enabled: !on }) });
+	            if (r?.success) {
+	                sw.classList.toggle('on');
+	                document.getElementById('auto-label').textContent = sw.classList.contains('on') ? '已开启' : '已关闭';
+	            }
+	        }
+
+	        async function togglePricingAuto() {
+	            const sw = document.getElementById('pricing-auto-switch');
+	            if (!sw) return;
+	            const on = sw.classList.contains('on');
+	            const r = await api('/api/config/pricing-auto', { method: 'POST', body: JSON.stringify({ enabled: !on }) });
+	            if (r?.success) {
+	                sw.classList.toggle('on');
+	                const label = document.getElementById('pricing-auto-label');
+	                if (label) label.textContent = sw.classList.contains('on') ? '已开启' : '已关闭';
+	                // 切换后立即刷新，让价格与来源信息同步
+	                refreshStatus();
+	            } else {
+	                toast('切换失败', 'error');
+	            }
+	        }
 
         async function saveUpdateSettings() {
             const idleMinutes = parseInt(document.getElementById('idle-input').value);
@@ -2087,6 +2180,7 @@
             }
 
             if (idleSaved && checkSaved) {
+                updateSettingsDirty = false;
                 toast('设置已保存', 'success');
             } else if (idleSaved || checkSaved) {
                 const reason = (!idleSaved ? (r1?.error || r1?.message || '空闲阈值保存失败') : '')
@@ -2190,6 +2284,7 @@
 	        initLogFilter();
 	        initQuote();
 	        initPricingInputs();
+	        initUpdateSettingsInputs();
         refreshAll();
         // 每5秒刷新一次状态和资源监控
         setInterval(() => {
