@@ -14,9 +14,10 @@ import threading
 import re
 import platform
 import shutil
+import tempfile
+import tarfile
 from datetime import datetime, timedelta
 from collections import deque
-from functools import lru_cache, wraps
 from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 import requests
@@ -79,6 +80,9 @@ CONFIG = {
     'pricing_cache': 0.0,
     'quotes_path': os.path.join(DATA_DIR, 'quotes.txt'),
     'disk_path': '/',
+    # 安全默认：只监听本机。如需局域网访问，把 CLIPROXY_PANEL_BIND_HOST 改为 0.0.0.0
+    'bind_host': '127.0.0.1',
+    'panel_access_key': '',
 }
 
 ENV_PREFIX = 'CLIPROXY_PANEL_'
@@ -93,6 +97,39 @@ CONFIG_TYPES = {
     'pricing_output': float,
     'pricing_cache': float,
 }
+
+
+def _panel_access_key_expected() -> str:
+    return str(CONFIG.get('panel_access_key', '') or '').strip()
+
+
+def _panel_access_key_provided() -> str:
+    return str(
+        request.headers.get('X-Panel-Key')
+        or request.args.get('panel_key')
+        or request.cookies.get('panel_key')
+        or ''
+    ).strip()
+
+
+@app.before_request
+def _enforce_panel_access_key():
+    expected = _panel_access_key_expected()
+    if not expected:
+        return None
+
+    # 允许 CORS 预检请求通过
+    if request.method == 'OPTIONS':
+        return None
+
+    # 只保护 API（静态页面可访问，但无法读取/操作数据）
+    if not request.path.startswith('/api'):
+        return None
+
+    if _panel_access_key_provided() != expected:
+        return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+
+    return None
 
 
 def _parse_bool(value):
@@ -605,9 +642,10 @@ def aggregate_usage_snapshot(snapshot):
         input_tokens = _safe_int(tokens.get('input_tokens', tokens.get('input', tokens.get('prompt_tokens', 0))))
         output_tokens = _safe_int(tokens.get('output_tokens', tokens.get('output', tokens.get('completion_tokens', 0))))
         cached_tokens = _safe_int(tokens.get('cached_tokens', tokens.get('cache', 0)))
+        reasoning_tokens = _safe_int(tokens.get('reasoning_tokens', tokens.get('reasoning', 0)))
         total_tokens = _safe_int(tokens.get('total_tokens', tokens.get('total', obj.get('total_tokens', 0))))
         if total_tokens == 0:
-            total_tokens = input_tokens + output_tokens + cached_tokens
+            total_tokens = input_tokens + output_tokens + reasoning_tokens
         return input_tokens, output_tokens, cached_tokens, total_tokens
 
     apis = usage.get('apis', [])
@@ -657,9 +695,13 @@ def compute_usage_costs(tokens, pricing):
     output_price = _safe_float(pricing.get('output', 0.0))
     cache_price = _safe_float(pricing.get('cache', 0.0))
 
-    input_cost = tokens.get('input_tokens', 0) / 1_000_000 * input_price
+    input_tokens = _safe_int(tokens.get('input_tokens', 0))
+    cached_tokens = _safe_int(tokens.get('cached_tokens', 0))
+    billable_input_tokens = max(input_tokens - cached_tokens, 0)
+
+    input_cost = billable_input_tokens / 1_000_000 * input_price
     output_cost = tokens.get('output_tokens', 0) / 1_000_000 * output_price
-    cache_cost = tokens.get('cached_tokens', 0) / 1_000_000 * cache_price
+    cache_cost = cached_tokens / 1_000_000 * cache_price
     total_cost = input_cost + output_cost + cache_cost
 
     return {
@@ -987,24 +1029,133 @@ def get_github_release_version():
         return cached
 
     try:
-        import urllib.request
-        import ssl
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        repo = 'router-for-me/CLIProxyAPI'
+        api_url = f'https://api.github.com/repos/{repo}/releases/latest'
+        html_latest_url = f'https://github.com/{repo}/releases/latest'
 
-        req = urllib.request.Request(
-            'https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest',
-            headers={'User-Agent': 'CLIProxyPanel'}
-        )
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
-            data = json.loads(resp.read().decode())
-            version = data.get('tag_name', 'unknown')
-            cache.set(cache_key, version)
-            return version
+        def api_headers():
+            headers = {
+                'User-Agent': 'CLIProxyPanel',
+                'Accept': 'application/vnd.github+json',
+            }
+            token = (os.environ.get('CLIPROXY_PANEL_GITHUB_TOKEN') or os.environ.get('GITHUB_TOKEN') or '').strip()
+            if token:
+                headers['Authorization'] = 'Bearer ' + token
+            return headers
+
+        # 1) 优先用 GitHub API（有 token 时限额更高）
+        try:
+            resp = requests.get(api_url, headers=api_headers(), timeout=10)
+            if resp.status_code == 200:
+                data = resp.json() if resp.content else {}
+                version = (data.get('tag_name') if isinstance(data, dict) else None) or 'unknown'
+                cache.set(cache_key, version)
+                return version
+        except Exception as e:
+            print(f'get_github_release_version api error: {e}')
+
+        # 2) 回退：解析 /releases/latest 的 302 跳转（不依赖 GitHub API，避免 rate limit）
+        try:
+            resp = requests.get(
+                html_latest_url,
+                headers={'User-Agent': 'CLIProxyPanel'},
+                timeout=10,
+                allow_redirects=False,
+            )
+            location = resp.headers.get('Location', '')
+            m = re.search(r'/tag/(v[^/?#]+)', location)
+            if not m:
+                # 极端情况下不返回 302，则跟随跳转后从最终 URL 解析
+                resp2 = requests.get(
+                    html_latest_url,
+                    headers={'User-Agent': 'CLIProxyPanel'},
+                    timeout=10,
+                    allow_redirects=True,
+                )
+                m = re.search(r'/tag/(v[^/?#]+)', str(getattr(resp2, 'url', '') or ''))
+            if m:
+                version = m.group(1)
+                cache.set(cache_key, version)
+                return version
+        except Exception as e:
+            print(f'get_github_release_version fallback error: {e}')
     except Exception as e:
         print(f'get_github_release_version error: {e}')
         return 'unknown'
+
+    return 'unknown'
+
+
+def _normalize_release_version(version):
+    if version is None:
+        return ''
+    v = str(version).strip()
+    if not v:
+        return ''
+    if v.lower() == 'unknown':
+        return 'unknown'
+    if v.lower() == 'dev':
+        return 'dev'
+    if v.startswith(('v', 'V')) and len(v) > 1:
+        return v[1:]
+    return v
+
+
+def _decorate_version_tag(version):
+    """统一显示为 vX.Y.Z（如果看起来像语义版本）"""
+    raw = str(version).strip() if version is not None else ''
+    if not raw:
+        return raw
+    if raw.lower() in {'unknown', 'dev'}:
+        return raw.lower()
+    normalized = _normalize_release_version(raw)
+    # 只对形如 1.2.3 这样的做装饰
+    if re.match(r'^\d+(\.\d+){1,3}$', normalized):
+        return f'v{normalized}'
+    return raw
+
+
+def _cliproxy_management_get(path, timeout=6):
+    base_url = _build_management_base_url()
+    url = f'{base_url}{path}'
+    headers = _management_headers()
+    try:
+        return requests.get(url, headers=headers, timeout=timeout)
+    except Exception:
+        return None
+
+
+def _get_local_version_from_management():
+    """优先从 CLIProxyAPI 管理接口响应头读取版本号（适用于二进制安装）"""
+    cache_key = 'local_version_mgmt'
+    cached = cache.get(cache_key, max_age=10)
+    if cached:
+        return cached
+
+    resp = _cliproxy_management_get('/v0/management/config', timeout=5)
+    if resp is None:
+        return None
+    try:
+        if resp.status_code != 200:
+            return None
+        header_value = resp.headers.get('X-Cpa-Version') or resp.headers.get('X-CPA-VERSION')
+        if not header_value:
+            return None
+        version = _decorate_version_tag(header_value)
+        if version:
+            cache.set(cache_key, version)
+            return version
+    except Exception:
+        return None
+    return None
+
+
+def _is_git_repo(path):
+    try:
+        return bool(path) and os.path.isdir(path) and os.path.isdir(os.path.join(path, '.git'))
+    except Exception:
+        return False
+
 
 def get_local_version():
     """获取本地版本号"""
@@ -1012,6 +1163,17 @@ def get_local_version():
     cached = cache.get(cache_key, max_age=30)
     if cached:
         return cached
+
+    # 1) 优先：从管理接口读取（适配 release 二进制安装场景）
+    mgmt_version = _get_local_version_from_management()
+    if mgmt_version:
+        cache.set(cache_key, mgmt_version)
+        return mgmt_version
+
+    # 2) 其次：本地 git 仓库
+    if not (_is_git_repo(CONFIG.get('cliproxy_dir')) and command_available('git')):
+        cache.set(cache_key, 'unknown')
+        return 'unknown'
 
     # 确保本地有最新的 tag 信息
     run_cmd(f'cd {CONFIG["cliproxy_dir"]} && git fetch --tags 2>/dev/null', timeout=10)
@@ -1267,9 +1429,17 @@ def check_for_updates(use_cache=True):
 
     current = get_local_version()
     latest = get_github_release_version()
-    state['current_version'] = current
-    state['latest_version'] = latest
-    result = current != latest and latest != 'unknown' and current != 'unknown'
+
+    # 统一展示版本格式
+    current_display = _decorate_version_tag(current)
+    latest_display = _decorate_version_tag(latest)
+    state['current_version'] = current_display
+    state['latest_version'] = latest_display
+
+    # 用规范化结果比较，避免 v 前缀导致误判
+    current_norm = _normalize_release_version(current_display)
+    latest_norm = _normalize_release_version(latest_display)
+    result = current_norm != latest_norm and latest_norm not in {'unknown', ''} and current_norm not in {'unknown', ''}
     cache.set(cache_key, result)
     return result
 
@@ -1306,23 +1476,40 @@ def perform_update():
         run_cmd(f'systemctl stop {CONFIG["cliproxy_service"]}')
         time.sleep(2)
 
-        result['details'].append('Pulling latest code...')
-        success, stdout, stderr = run_cmd(f'cd {CONFIG["cliproxy_dir"]} && git fetch --tags && git pull origin main')
-        if not success:
-            result['message'] = f'Pull failed: {stderr}'
-            return False, result
-        result['details'].append(stdout)
+        # ===== 更新策略选择 =====
+        # A) 源码安装：git pull + go build（旧逻辑）
+        # B) release 二进制：下载最新 release 并替换二进制（推荐）
+        cliproxy_dir = CONFIG.get('cliproxy_dir')
+        cliproxy_bin = CONFIG.get('cliproxy_binary') or ''
 
-        result['details'].append('Rebuilding...')
-        success, stdout, stderr = run_cmd(
-            f'cd {CONFIG["cliproxy_dir"]} && go build -o cliproxy ./cmd/server',
-            timeout=300
-        )
-        if not success:
-            result['message'] = f'Build failed: {stderr}'
-            run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
-            return False, result
-        result['details'].append('Build successful')
+        use_source_update = _is_git_repo(cliproxy_dir) and command_available('git') and command_available('go')
+
+        if use_source_update:
+            result['details'].append('Pulling latest code...')
+            success, stdout, stderr = run_cmd(f'cd {cliproxy_dir} && git fetch --tags && git pull origin main')
+            if not success:
+                result['message'] = f'Pull failed: {stderr}'
+                return False, result
+            result['details'].append(stdout)
+
+            result['details'].append('Rebuilding...')
+            success, stdout, stderr = run_cmd(
+                f'cd {cliproxy_dir} && go build -o cliproxy ./cmd/server',
+                timeout=300
+            )
+            if not success:
+                result['message'] = f'Build failed: {stderr}'
+                run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
+                return False, result
+            result['details'].append('Build successful')
+        else:
+            result['details'].append('Downloading latest release...')
+            ok, msg = update_from_github_release(binary_path=cliproxy_bin)
+            if not ok:
+                result['message'] = msg or 'Release update failed'
+                run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
+                return False, result
+            result['details'].append(msg or 'Release binary updated')
 
         result['details'].append('Starting service...')
         success, _, stderr = run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
@@ -1366,6 +1553,151 @@ def perform_update():
         return False, result
     finally:
         state['update_in_progress'] = False
+
+
+def _guess_goarch():
+    machine = (platform.machine() or '').lower()
+    if machine in {'aarch64', 'arm64'}:
+        return 'arm64'
+    if machine in {'x86_64', 'amd64'}:
+        return 'amd64'
+    if machine.startswith('armv7') or machine == 'armv7l':
+        return 'armv7'
+    return 'arm64'  # 默认偏向 arm64（常见于 N1 等设备）
+
+
+def update_from_github_release(binary_path=''):
+    """
+    下载并安装 CLIProxyAPI 最新 release（二进制安装场景）。
+    依赖：systemd + curl/requests 可用；需要当前进程有写入 binary_path 的权限（通常为 root）。
+    """
+    try:
+        if not binary_path:
+            return False, 'Binary path not set'
+
+        goarch = _guess_goarch()
+
+        repo = 'router-for-me/CLIProxyAPI'
+        api_error = None
+        data = {}
+
+        # 1) 优先：GitHub API（可能遇到未认证限流）
+        try:
+            headers = {'User-Agent': 'CLIProxyPanel', 'Accept': 'application/vnd.github+json'}
+            token = (os.environ.get('CLIPROXY_PANEL_GITHUB_TOKEN') or os.environ.get('GITHUB_TOKEN') or '').strip()
+            if token:
+                headers['Authorization'] = 'Bearer ' + token
+
+            resp = requests.get(
+                f'https://api.github.com/repos/{repo}/releases/latest',
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json() if resp.content else {}
+        except Exception as e:
+            api_error = e
+            data = {}
+            print(f'Warning: failed to fetch release info via GitHub API: {e}')
+
+        assets = data.get('assets', []) if isinstance(data, dict) else []
+
+        asset_url = ''
+        checksum_url = ''
+        for a in assets:
+            name = (a.get('name') or '')
+            url = (a.get('browser_download_url') or '')
+            if not url:
+                continue
+            if name.endswith(f'linux_{goarch}.tar.gz'):
+                asset_url = url
+            elif name == 'checksums.txt':
+                checksum_url = url
+
+        # 2) 回退：如果 API 拿不到资产列表（被限流/网络问题），用 tag + 固定命名规则拼装下载链接
+        if not asset_url:
+            tag = get_github_release_version()
+            tag_display = _decorate_version_tag(tag)
+            tag_number = _normalize_release_version(tag_display)
+            if not tag_number or tag_number in {'unknown', 'dev'}:
+                if api_error:
+                    return False, f'Failed to fetch latest release info (GitHub API limited): {api_error}'
+                return False, 'Failed to resolve latest release tag'
+
+            asset_name = f'CLIProxyAPI_{tag_number}_linux_{goarch}.tar.gz'
+            asset_url = f'https://github.com/{repo}/releases/download/{tag_display}/{asset_name}'
+            checksum_url = f'https://github.com/{repo}/releases/download/{tag_display}/checksums.txt'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tar_path = os.path.join(tmpdir, 'cliproxyapi.tar.gz')
+            # 下载 tarball
+            with requests.get(asset_url, timeout=60, stream=True) as r:
+                r.raise_for_status()
+                with open(tar_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+
+            # 校验 sha256（如果 checksums 可用）
+            if checksum_url:
+                try:
+                    c = requests.get(checksum_url, timeout=15)
+                    if c.status_code != 200:
+                        raise RuntimeError(f'checksums status: {c.status_code}')
+                    expected = None
+                    for line in c.text.splitlines():
+                        parts = line.strip().split()
+                        if len(parts) >= 2 and parts[-1].endswith(f'linux_{goarch}.tar.gz'):
+                            expected = parts[0]
+                            break
+                    if expected:
+                        import hashlib
+                        h = hashlib.sha256()
+                        with open(tar_path, 'rb') as f:
+                            for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                                h.update(chunk)
+                        actual = h.hexdigest()
+                        if actual.lower() != expected.lower():
+                            return False, 'Checksum mismatch (download may be corrupted)'
+                except Exception as e:
+                    # 不阻断更新，但记录一下
+                    print(f'Warning: checksum verify skipped/failed: {e}')
+
+            # 解压并找到二进制
+            try:
+                def _safe_extract(tar, target_dir):
+                    target_dir_abs = os.path.abspath(target_dir)
+                    for member in tar.getmembers():
+                        member_path = os.path.abspath(os.path.join(target_dir_abs, member.name))
+                        if not member_path.startswith(target_dir_abs + os.sep) and member_path != target_dir_abs:
+                            raise RuntimeError(f'Unsafe path in tar: {member.name}')
+                    tar.extractall(target_dir_abs)
+
+                with tarfile.open(tar_path, 'r:gz') as tf:
+                    _safe_extract(tf, tmpdir)
+            except Exception as e:
+                return False, f'Extract failed: {e}'
+
+            extracted_bin = os.path.join(tmpdir, 'cli-proxy-api')
+            if not os.path.exists(extracted_bin):
+                # 某些打包工具会带目录前缀，兜底遍历
+                for root, _, files in os.walk(tmpdir):
+                    if 'cli-proxy-api' in files:
+                        extracted_bin = os.path.join(root, 'cli-proxy-api')
+                        break
+
+            if not os.path.exists(extracted_bin):
+                return False, 'cli-proxy-api not found in release package'
+
+            # 原子替换
+            tmp_target = f'{binary_path}.tmp'
+            shutil.copy2(extracted_bin, tmp_target)
+            os.chmod(tmp_target, 0o755)
+            os.replace(tmp_target, binary_path)
+
+        return True, f'Release updated for linux_{goarch}'
+    except Exception as e:
+        return False, f'Release update error: {e}'
 
 def auto_update_worker():
     while True:
@@ -2093,7 +2425,7 @@ def api_status():
     display_input_tokens = acc['input_tokens']
     display_output_tokens = acc['output_tokens']
     display_cached_tokens = acc['cached_tokens']
-    display_total_tokens = display_input_tokens + display_output_tokens + display_cached_tokens
+    display_total_tokens = display_input_tokens + display_output_tokens
     display_total_requests = acc['total_requests']
     display_success = acc['success']
     display_failure = acc['failure']
@@ -3010,4 +3342,4 @@ if __name__ == '__main__':
             print(f"Warning: quotes count {len(quotes)}, authors {author_count}")
 
     print(f'CPA-XX Management Panel v3 (Optimized) started on port {CONFIG["panel_port"]}')
-    app.run(host='0.0.0.0', port=CONFIG['panel_port'], debug=False)
+    app.run(host=str(CONFIG.get('bind_host', '0.0.0.0') or '0.0.0.0'), port=CONFIG['panel_port'], debug=False)

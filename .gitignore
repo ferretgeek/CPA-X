@@ -8,6 +8,7 @@ venv/
 env/
 .env
 .env.*
+!.env.example
 data/
 *.log
 *.sqlite

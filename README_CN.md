@@ -79,6 +79,8 @@ http://127.0.0.1:8080
 ## 安全提示
 - **不要把 `.env` 提交到仓库**（已在 `.gitignore` 中忽略）
 - 管理密钥、模型密钥等敏感字段请只放在 `.env`
+- 如果面板只用于本机，建议把 `CLIPROXY_PANEL_BIND_HOST` 设为 `127.0.0.1`，避免局域网/公网访问
+- 如需对面板加一道访问门槛，可设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`（启用后 `/api/*` 需要 `X-Panel-Key` 或 URL 参数 `panel_key`）
 
 ## 许可协议
 MIT License（见 `LICENSE`）
