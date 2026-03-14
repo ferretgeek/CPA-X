@@ -9,6 +9,7 @@ env/
 .env
 .env.*
 !.env.example
+!.env.docker.example
 data/
 *.log
 *.sqlite

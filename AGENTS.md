@@ -9,13 +9,29 @@
 
 ## 1) 最快可用（推荐路径）
 
-在目标机器上执行：
+在目标机器上执行（**宿主机 / systemd 部署**，可用全部功能）：
 
 1. `bash scripts/install.sh`
 2. 如果机器上已有 CLIProxyAPI，接着执行：`python3 scripts/doctor.py --write-env`
 3. 重启面板服务（如果你用 systemd 安装）：`systemctl restart cliproxy-panel`
 
 > `scripts/doctor.py` 会尽可能自动探测当前设备已有的 CLIProxyAPI（systemd 服务、config 路径、binary 路径、auth_dir、log 路径），并写入 `.env`。
+
+## 1.1) Docker/容器部署（需要在文档里明确的限制）
+
+如果你用 Docker/容器部署面板，请先做出选择：
+
+- **要“全功能”（自动更新/服务控制）**：不要用容器。因为容器里通常没有 systemd，也不具备操作宿主机服务与替换宿主机二进制的权限。
+- **只要“监控与查看”（状态/统计/模型/日志/配置读取）**：可以用容器，但你必须显式提供：
+  - 面板监听：`CLIPROXY_PANEL_BIND_HOST=0.0.0.0`（否则端口映射无法访问）
+  - 上游管理接口地址：`CLIPROXY_PANEL_CLIPROXY_API_BASE` / `CLIPROXY_PANEL_CLIPROXY_API_PORT`
+  - 需要读取的文件：把 `config.yaml`、`main.log`、`auth_dir` 等挂载进容器，并把对应环境变量指向容器内路径
+
+推荐直接用仓库内的：
+
+- `Dockerfile`
+- `docker-compose.yml`
+- `.env.docker.example`
 
 ## 2) 你必须知道/补齐的“密钥”
 
@@ -67,4 +83,3 @@
 - 文档优先“可执行”与“可验证”（给命令/期望输出/失败处理）
 - 所有默认值偏安全（默认只监听本机；API 可选加密钥）
 - 自动探测必须“只补缺省值”，不能破坏用户显式配置
-

@@ -24,6 +24,27 @@ systemctl restart cliproxy-panel
 
 > 如果没有 systemd（或不想装服务），可以直接运行：`python3 app.py`
 
+## 1.1) Docker/容器部署（适合“监控”，不适合“全功能自动更新”）
+
+容器部署的关键现实：
+
+- 容器里通常没有 systemd，也没有权限操作宿主机服务，因此**自动更新/服务控制功能默认不可用**（建议设置 `CLIPROXY_PANEL_AUTO_UPDATE_ENABLED=false`）。
+- 容器内服务要被端口映射访问，必须监听 `0.0.0.0`（因此需要 `CLIPROXY_PANEL_BIND_HOST=0.0.0.0`）。
+
+仓库已提供：
+
+- `Dockerfile`
+- `docker-compose.yml`
+- `.env.docker.example`
+
+你需要确保两类对接都“可达”：
+
+1) 面板 → 上游 CLIProxyAPI 管理接口  
+   - 典型场景是上游跑在宿主机：容器里要能访问宿主机地址（Docker Desktop 常用 `host.docker.internal`；Linux 需要做 host-gateway 映射）
+
+2) 面板 → 文件路径（可选但强烈建议）  
+   - 如果你希望“日志/配置/auth 文件列表”等功能正常：把宿主机的 `config.yaml`、`main.log`、`auth_dir` 挂载到容器，并把环境变量指向容器内路径（例如 `/mnt/cliproxy/...`）
+
 ## 2) doctor：自动探测并生成 .env
 
 `scripts/doctor.py` 会尝试：
@@ -80,4 +101,3 @@ systemctl restart cliproxy-panel
 
 - 默认 `CLIPROXY_PANEL_BIND_HOST=127.0.0.1`
 - 如需外网访问，建议同时设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`
-

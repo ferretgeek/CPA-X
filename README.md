@@ -81,6 +81,23 @@ Open your browser and visit:
 http://127.0.0.1:8080
 ```
 
+## Docker / Container Deployment (Optional)
+
+Good for: monitoring & read-only operations (status/stats/models/logs/config reads).  
+Not good for: auto-update / service control (containers typically don't have systemd or host privileges).
+
+This repo includes:
+- `Dockerfile`
+- `docker-compose.yml`
+- `.env.docker.example`
+
+Shortest path (compose):
+```bash
+docker compose up -d --build
+```
+
+If you need logs/config/auth file features, follow the comments in `docker-compose.yml` to mount host files/directories and point `CLIPROXY_PANEL_*` paths to container paths.
+
 ## FAQ
 
 ### 1) Page loads but data is empty

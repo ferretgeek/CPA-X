@@ -1,0 +1,43 @@
+services:
+  cpax-panel:
+    build: .
+    container_name: cpax-panel
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # 容器内必须监听 0.0.0.0 才能让端口映射生效
+      CLIPROXY_PANEL_BIND_HOST: "0.0.0.0"
+      CLIPROXY_PANEL_PANEL_PORT: "8080"
+
+      # 让面板访问宿主机上的 CLIProxyAPI（默认端口 8317）
+      # Windows/Mac Docker Desktop 通常可直接用 host.docker.internal
+      # Linux 需要 extra_hosts 把 host.docker.internal 映射到 host-gateway（见下方）
+      CLIPROXY_PANEL_CLIPROXY_API_BASE: "http://host.docker.internal"
+      CLIPROXY_PANEL_CLIPROXY_API_PORT: "8317"
+
+      # 可选：给面板 API 加一道访问密钥（推荐）
+      # CLIPROXY_PANEL_PANEL_ACCESS_KEY: "change-me"
+
+      # 可选：提高 GitHub 限流额度（不配置也能工作）
+      # CLIPROXY_PANEL_GITHUB_TOKEN: ""
+
+      # ===== 如需“配置/日志/auth 文件”等功能，请挂载并把路径指向容器内路径 =====
+      # CLIPROXY_PANEL_CLIPROXY_CONFIG: "/mnt/cliproxy/config.yaml"
+      # CLIPROXY_PANEL_CLIPROXY_LOG: "/mnt/cliproxy/main.log"
+      # CLIPROXY_PANEL_AUTH_DIR: "/mnt/cliproxy/auths"
+
+      # ===== 自动更新/服务控制（容器模式默认不可用）=====
+      # 需要 systemd + 写入二进制路径，通常不建议在容器里做
+      # CLIPROXY_PANEL_CLIPROXY_SERVICE: "cli-proxy-api"
+      # CLIPROXY_PANEL_CLIPROXY_BINARY: "/usr/local/bin/cliproxyapi"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # 面板自身数据持久化（统计/历史等）
+      - ./data:/app/data
+
+      # ===== 按需挂载（示例）=====
+      # - /path/on/host/config.yaml:/mnt/cliproxy/config.yaml:ro
+      # - /path/on/host/main.log:/mnt/cliproxy/main.log:ro
+      # - /path/on/host/auths:/mnt/cliproxy/auths:ro
