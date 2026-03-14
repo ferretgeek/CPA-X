@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CPA-XX 管理面板</title>
+    <meta name="theme-color" content="#0c1222">
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="shortcut icon" href="/favicon.ico">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1289,28 +1293,55 @@
                 : '<path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>';
         }
 
-        // API 调用
-        async function api(endpoint, opts = {}) {
-            const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+	        // API 调用
+	        async function api(endpoint, opts = {}) {
+	            const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+	            const panelKey = (localStorage.getItem('panel_key') || '').trim();
+	            if (panelKey) headers['X-Panel-Key'] = panelKey;
 
-            const controller = new AbortController();
-            const timeoutMs = typeof opts.timeout === 'number' ? opts.timeout : 15000;
-            const timer = setTimeout(() => controller.abort(), timeoutMs);
+	            const controller = new AbortController();
+	            const timeoutMs = typeof opts.timeout === 'number' ? opts.timeout : 15000;
+	            const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-            try {
-                const res = await fetch(API + endpoint, { ...opts, headers, signal: controller.signal });
-                return await res.json().catch(() => null);
-            } catch (e) {
-                if (e && e.name === 'AbortError') {
-                    console.error('请求超时:', endpoint);
-                } else {
+	            try {
+	                const res = await fetch(API + endpoint, { ...opts, headers, signal: controller.signal });
+	                if (res.status === 401) {
+	                    if (!panelKey) {
+	                        const input = prompt('需要面板密钥（Panel Access Key）。请输入：');
+	                        if (input && input.trim()) {
+	                            localStorage.setItem('panel_key', input.trim());
+	                            return await api(endpoint, opts);
+	                        }
+	                        toast('需要面板密钥才能访问', 'error');
+	                    } else {
+	                        localStorage.removeItem('panel_key');
+	                        toast('面板密钥无效，请重新设置', 'error');
+	                    }
+	                    return null;
+	                }
+	                return await res.json().catch(() => null);
+	            } catch (e) {
+	                if (e && e.name === 'AbortError') {
+	                    console.error('请求超时:', endpoint);
+	                } else {
                     console.error(e);
                 }
                 return null;
             } finally {
                 clearTimeout(timer);
-            }
-        }
+	            }
+	        }
+
+	        function initPanelKeyFromURL() {
+	            try {
+	                const url = new URL(window.location.href);
+	                const key = (url.searchParams.get('panel_key') || '').trim();
+	                if (!key) return;
+	                localStorage.setItem('panel_key', key);
+	                url.searchParams.delete('panel_key');
+	                history.replaceState({}, '', url.pathname + (url.search ? url.search : '') + url.hash);
+	            } catch (e) {}
+	        }
 
         function formatMillionTokens(value) {
             const num = Number(value || 0);
@@ -1621,7 +1652,7 @@
             const inputTokens = d.requests.input_tokens || 0;
             const outputTokens = d.requests.output_tokens || 0;
             const cacheTokens = d.requests.cached_tokens || 0;
-            const totalTokens = d.requests.total_tokens || (inputTokens + outputTokens + cacheTokens);
+            const totalTokens = d.requests.total_tokens || (inputTokens + outputTokens);
             document.getElementById('req-input-tokens').innerHTML = `输入：${formatMillionTokens(inputTokens)}`;
             document.getElementById('req-output-tokens').innerHTML = `输出：${formatMillionTokens(outputTokens)}`;
             document.getElementById('req-cache-tokens').innerHTML = `缓存：${formatMillionTokens(cacheTokens)}`;
@@ -2111,9 +2142,11 @@
             document.getElementById('validate-modal').classList.remove('active');
         }
 
-        function exportData(type) {
-            window.location.href = API + '/api/export/' + type;
-        }
+	        function exportData(type) {
+	            const key = (localStorage.getItem('panel_key') || '').trim();
+	            const base = API + '/api/export/' + type;
+	            window.location.href = key ? `${base}?panel_key=${encodeURIComponent(key)}` : base;
+	        }
 
         async function loadConfig() {
             const r = await api('/api/config');
@@ -2151,11 +2184,12 @@
             }, 3000);
         }
 
-        // 初始化
-        initTheme();
-        initLogFilter();
-        initQuote();
-        initPricingInputs();
+	        // 初始化
+	        initPanelKeyFromURL();
+	        initTheme();
+	        initLogFilter();
+	        initQuote();
+	        initPricingInputs();
         refreshAll();
         // 每5秒刷新一次状态和资源监控
         setInterval(() => {

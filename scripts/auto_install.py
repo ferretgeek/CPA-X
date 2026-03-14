@@ -40,7 +40,7 @@ def ensure_env(project_root: Path):
     env_file.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
 
 
-def systemd_quote(value: Path | str):
+def systemd_quote(value: Path | str) -> str:
     escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 

@@ -87,6 +87,8 @@ This is a Linux-only feature. On Windows, it will fail gracefully without affect
 ## Security Notes
 - **Do not commit `.env` to the repository** (already in `.gitignore`)
 - Keep management keys and model keys only in `.env`
+- If you only use the panel locally, set `CLIPROXY_PANEL_BIND_HOST=127.0.0.1` to avoid LAN/public access
+- For an extra protection layer, set `CLIPROXY_PANEL_PANEL_ACCESS_KEY` (then `/api/*` requires `X-Panel-Key` or URL query `panel_key`)
 
 ## License
 MIT License (see `LICENSE`)
