@@ -4,6 +4,10 @@
 
 一个用于 **CLIProxyAPI** 的监控与管理面板，支持健康检查、资源监控、日志查看、更新管理、请求统计与定价显示等功能。
 
+> **AI 优先**：本仓库主要面向 AI Agent 部署/运维（而不是人类手动部署）。
+> - AI 部署手册：`AI_DEPLOY_CN.md`
+> - Agent 指引：`AGENTS.md`
+
 ## 适用环境
 - **推荐：Linux**（面板含 `systemctl` 相关功能）
 - Python 3.11+
@@ -15,8 +19,11 @@
 
 ### 0) 一键安装（推荐）
 ```bash
-# Linux（会自动注册 systemd 服务）
+# Linux（会自动注册 systemd 服务；安装器会尽力自动探测并补齐 .env）
 bash scripts/install.sh
+
+# 如需手动再跑一次自动探测（推荐）
+python3 scripts/doctor.py --write-env
 ```
 
 ```powershell
@@ -54,7 +61,9 @@ cp .env.example .env
 - `CLIPROXY_PANEL_CLIPROXY_DIR` / `CLIPROXY_PANEL_CLIPROXY_CONFIG`
 - `CLIPROXY_PANEL_CLIPROXY_LOG`
 - `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `CLIPROXY_PANEL_CLIPROXY_API_PORT`
-- `CLIPROXY_PANEL_MANAGEMENT_KEY`（如 CLIProxy API 有管理密钥）
+- `CLIPROXY_PANEL_MANAGEMENT_KEY` / `CLIPROXY_PANEL_MODELS_API_KEY`（如上游启用了密钥）
+- `CLIPROXY_PANEL_CLIPROXY_SERVICE` / `CLIPROXY_PANEL_CLIPROXY_BINARY`（自动更新需要）
+- `CLIPROXY_PANEL_GITHUB_TOKEN`（可选：提高 GitHub 限流额度，减少 `latest=unknown`）
 
 ### 4) 启动面板
 ```bash

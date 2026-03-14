@@ -481,7 +481,10 @@ def _build_management_base_url():
 
 
 def _management_headers():
-    key = CONFIG.get('management_key', '')
+    key = str(CONFIG.get('management_key', '') or '').strip()
+    # AI 友好兜底：很多部署把管理密钥与 API Key 设为同一个值
+    if not key:
+        key = str(CONFIG.get('models_api_key', '') or '').strip()
     headers = {'Content-Type': 'application/json'}
     if key:
         headers['X-Management-Key'] = key
@@ -631,9 +634,9 @@ def aggregate_usage_snapshot(snapshot):
     if not isinstance(usage, dict):
         usage = snapshot if isinstance(snapshot, dict) else {}
 
-    reqs['total_requests'] += _safe_int(usage.get('total_requests', usage.get('total', 0)))
-    reqs['success'] += _safe_int(usage.get('success', usage.get('successful_requests', usage.get('success_count', 0))))
-    reqs['failure'] += _safe_int(usage.get('failure', usage.get('failed_requests', usage.get('failure_count', 0))))
+    top_total = _safe_int(usage.get('total_requests', usage.get('total', 0)))
+    top_success = _safe_int(usage.get('success', usage.get('successful_requests', usage.get('success_count', 0))))
+    top_failure = _safe_int(usage.get('failure', usage.get('failed_requests', usage.get('failure_count', 0))))
 
     def extract_tokens(obj):
         if not isinstance(obj, dict):
@@ -654,12 +657,16 @@ def aggregate_usage_snapshot(snapshot):
     if not isinstance(apis, list):
         apis = []
 
+    sum_total = 0
+    sum_success = 0
+    sum_failure = 0
+
     for api in apis:
         if not isinstance(api, dict):
             continue
-        reqs['total_requests'] += _safe_int(api.get('total_requests', api.get('total', api.get('requests', 0))))
-        reqs['success'] += _safe_int(api.get('success', api.get('successful_requests', api.get('success_count', 0))))
-        reqs['failure'] += _safe_int(api.get('failure', api.get('failed_requests', api.get('failure_count', 0))))
+        sum_total += _safe_int(api.get('total_requests', api.get('total', api.get('requests', 0))))
+        sum_success += _safe_int(api.get('success', api.get('successful_requests', api.get('success_count', 0))))
+        sum_failure += _safe_int(api.get('failure', api.get('failed_requests', api.get('failure_count', 0))))
 
         models = api.get('models', [])
         if isinstance(models, dict):
@@ -686,6 +693,16 @@ def aggregate_usage_snapshot(snapshot):
 
     if totals['total_tokens'] == 0:
         totals['total_tokens'] = _safe_int(usage.get('total_tokens', 0))
+
+    # 请求数/成功/失败：优先使用 usage 顶层汇总，避免与 apis breakdown 叠加导致双计数
+    if top_total > 0:
+        reqs['total_requests'] = top_total
+        reqs['success'] = top_success
+        reqs['failure'] = top_failure
+    else:
+        reqs['total_requests'] = sum_total
+        reqs['success'] = sum_success
+        reqs['failure'] = sum_failure
 
     return totals, reqs
 
@@ -1421,12 +1438,6 @@ def get_latest_commit():
 
 def check_for_updates(use_cache=True):
     """检查更新（使用GitHub releases）"""
-    cache_key = 'update_check'
-    if use_cache:
-        cached = cache.get(cache_key, max_age=60)
-        if cached is not None:
-            return cached
-
     current = get_local_version()
     latest = get_github_release_version()
 
@@ -1440,7 +1451,9 @@ def check_for_updates(use_cache=True):
     current_norm = _normalize_release_version(current_display)
     latest_norm = _normalize_release_version(latest_display)
     result = current_norm != latest_norm and latest_norm not in {'unknown', ''} and current_norm not in {'unknown', ''}
-    cache.set(cache_key, result)
+    # 只缓存判断结果，不阻断 state 更新（否则 UI 可能卡在 unknown）
+    if use_cache:
+        cache.set('update_check', result)
     return result
 
 def is_idle():
@@ -1481,6 +1494,7 @@ def perform_update():
         # B) release 二进制：下载最新 release 并替换二进制（推荐）
         cliproxy_dir = CONFIG.get('cliproxy_dir')
         cliproxy_bin = CONFIG.get('cliproxy_binary') or ''
+        backup_path = None
 
         use_source_update = _is_git_repo(cliproxy_dir) and command_available('git') and command_available('go')
 
@@ -1503,6 +1517,23 @@ def perform_update():
                 return False, result
             result['details'].append('Build successful')
         else:
+            if not cliproxy_bin:
+                result['message'] = 'Binary path not set (CLIPROXY_PANEL_CLIPROXY_BINARY)'
+                run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
+                return False, result
+
+            # 为回滚做备份（更新后启动失败时可恢复）
+            try:
+                if os.path.exists(cliproxy_bin):
+                    ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+                    backup_path = f'{cliproxy_bin}.bak.{ts}'
+                    shutil.copy2(cliproxy_bin, backup_path)
+                    result['details'].append(f'Backup created: {backup_path}')
+            except Exception as e:
+                result['message'] = f'Backup failed: {e}'
+                run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
+                return False, result
+
             result['details'].append('Downloading latest release...')
             ok, msg = update_from_github_release(binary_path=cliproxy_bin)
             if not ok:
@@ -1511,17 +1542,40 @@ def perform_update():
                 return False, result
             result['details'].append(msg or 'Release binary updated')
 
+        def _rollback_release_binary(reason: str) -> bool:
+            if not backup_path or not cliproxy_bin:
+                return False
+            result['details'].append(f'Rollback: {reason}')
+            try:
+                shutil.copy2(backup_path, cliproxy_bin)
+                try:
+                    os.chmod(cliproxy_bin, 0o755)
+                except Exception:
+                    pass
+                run_cmd(f'systemctl restart {CONFIG["cliproxy_service"]}')
+                time.sleep(2)
+                status2 = get_service_status()
+                if status2.get('running'):
+                    result['details'].append('Rollback successful')
+                    return True
+                result['details'].append('Rollback attempted but service still not running')
+            except Exception as e:
+                result['details'].append(f'Rollback failed: {e}')
+            return False
+
         result['details'].append('Starting service...')
         success, _, stderr = run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
         if not success:
-            result['message'] = f'Start failed: {stderr}'
+            rolled_back = _rollback_release_binary('start failed after update')
+            result['message'] = f'Start failed: {stderr}' + (' (rolled back)' if rolled_back else '')
             return False, result
 
         time.sleep(2)
 
         status = get_service_status()
         if not status['running']:
-            result['message'] = 'Service not running after start'
+            rolled_back = _rollback_release_binary('service not running after start')
+            result['message'] = 'Service not running after start' + (' (rolled back)' if rolled_back else '')
             return False, result
 
         result['success'] = True
@@ -1678,16 +1732,74 @@ def update_from_github_release(binary_path=''):
             except Exception as e:
                 return False, f'Extract failed: {e}'
 
-            extracted_bin = os.path.join(tmpdir, 'cli-proxy-api')
-            if not os.path.exists(extracted_bin):
-                # 某些打包工具会带目录前缀，兜底遍历
-                for root, _, files in os.walk(tmpdir):
-                    if 'cli-proxy-api' in files:
-                        extracted_bin = os.path.join(root, 'cli-proxy-api')
-                        break
+            def _looks_like_elf(path: str) -> bool:
+                try:
+                    if not os.path.isfile(path):
+                        return False
+                    with open(path, 'rb') as f:
+                        head = f.read(4)
+                    return head == b'\x7fELF'
+                except Exception:
+                    return False
 
-            if not os.path.exists(extracted_bin):
-                return False, 'cli-proxy-api not found in release package'
+            def _find_extracted_binary(extract_root: str) -> str:
+                preferred_names = [
+                    'cli-proxy-api',
+                    'cliproxyapi',
+                    'cliproxy',
+                    'CLIProxyAPI',
+                    'cli_proxy_api',
+                ]
+
+                # 1) 精确名字优先
+                by_name = []
+                for root, _, files in os.walk(extract_root):
+                    for name in files:
+                        if name in preferred_names:
+                            by_name.append((preferred_names.index(name), os.path.join(root, name)))
+                by_name.sort(key=lambda x: x[0])
+                for _, p in by_name:
+                    try:
+                        if _looks_like_elf(p) or os.path.getsize(p) > 128 * 1024:
+                            return p
+                    except Exception:
+                        continue
+
+                # 2) 兜底：找 ELF 可执行文件
+                elf_paths = []
+                for root, _, files in os.walk(extract_root):
+                    for name in files:
+                        p = os.path.join(root, name)
+                        if _looks_like_elf(p):
+                            elf_paths.append(p)
+
+                if len(elf_paths) == 1:
+                    return elf_paths[0]
+
+                if elf_paths:
+                    def score(p: str) -> tuple:
+                        base = os.path.basename(p).lower()
+                        s = 0
+                        if 'cliproxy' in base:
+                            s += 3
+                        if 'proxy' in base:
+                            s += 2
+                        if 'api' in base:
+                            s += 2
+                        try:
+                            s_size = os.path.getsize(p)
+                        except Exception:
+                            s_size = 0
+                        return (s, s_size)
+
+                    elf_paths.sort(key=score, reverse=True)
+                    return elf_paths[0]
+
+                return ''
+
+            extracted_bin = _find_extracted_binary(tmpdir)
+            if not extracted_bin:
+                return False, 'No binary found in release package'
 
             # 原子替换
             tmp_target = f'{binary_path}.tmp'
@@ -2343,7 +2455,7 @@ def index():
 @app.route('/api/status')
 def api_status():
     service = get_service_status()
-    check_for_updates()
+    has_update = check_for_updates()
     log_requests = get_request_count_from_logs()
     snapshot = fetch_usage_snapshot()
     token_totals, usage_reqs = aggregate_usage_snapshot(snapshot)
@@ -2456,7 +2568,7 @@ def api_status():
         'version': {
             'current': state['current_version'],
             'latest': state['latest_version'],
-            'has_update': state['current_version'] != state['latest_version']
+            'has_update': has_update
         },
         'requests': {
             'count': final_count,

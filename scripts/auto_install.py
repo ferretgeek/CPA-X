@@ -35,9 +35,20 @@ def install_requirements(project_root: Path, venv_py: str):
 def ensure_env(project_root: Path):
     env_file = project_root / ".env"
     example = project_root / ".env.example"
-    if env_file.exists() or not example.exists():
-        return
-    env_file.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+    if not env_file.exists() and example.exists():
+        env_file.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # AI-friendly: try auto-detect to fill paths/service name (keys still need manual input)
+    doctor = project_root / "scripts" / "doctor.py"
+    if doctor.exists():
+        try:
+            subprocess.run(
+                [sys.executable, str(doctor), "--write-env", f"--env-path={env_file}"],
+                cwd=str(project_root),
+                check=False,
+            )
+        except Exception:
+            pass
 
 
 def systemd_quote(value: Path | str) -> str:
