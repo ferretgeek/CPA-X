@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CPA-XX 管理面板后端 v3 (Performance Optimized)
+CPA-X 管理面板后端 v2.0.0
 功能: 为 CLIProxyAPI 提供监控统计、健康检查、资源监控、配置管理、API测试、模型管理
 优化: 缓存机制、预编译正则、非阻塞监控、减少shell调用
 """
@@ -21,6 +21,10 @@ from collections import deque
 from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 import requests
+
+# 面板自身版本（与 GitHub Release/README 同步）
+PANEL_NAME = "CPA-X"
+PANEL_VERSION = "2.0.0"
 
 # ==================== 预编译正则表达式 ====================
 # 日志格式: [2026-01-17 05:21:09] [--------] [info ] [gin_logger.go:92] 200 |            0s |       127.0.0.1 | GET     "/v1/models"
@@ -2796,6 +2800,10 @@ def api_status():
     final_failed = display_failure if display_failure > 0 else log_requests.get('failed', 0)
 
     return jsonify({
+        'panel': {
+            'name': PANEL_NAME,
+            'version': f'v{PANEL_VERSION}',
+        },
         'service': service,
         'version': {
             'current': state['current_version'],
@@ -3710,5 +3718,5 @@ if __name__ == '__main__':
         if len(quotes) < 300 or author_count < 30:
             print(f"Warning: quotes count {len(quotes)}, authors {author_count}")
 
-    print(f'CPA-XX Management Panel v3 (Optimized) started on port {CONFIG["panel_port"]}')
+    print(f'{PANEL_NAME} Panel v{PANEL_VERSION} started on port {CONFIG["panel_port"]}')
     app.run(host=str(CONFIG.get('bind_host', '0.0.0.0') or '0.0.0.0'), port=CONFIG['panel_port'], debug=False)

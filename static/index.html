@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CPA-XX 管理面板</title>
+    <title>CPA-X 管理面板</title>
     <meta name="theme-color" content="#0c1222">
     <link rel="icon" href="/favicon.ico" sizes="any">
     <link rel="shortcut icon" href="/favicon.ico">
@@ -763,7 +763,8 @@
             <div class="logo-icon">
                 <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
             </div>
-            <span class="logo-text">CPA-XX</span>
+            <span class="logo-text">CPA-X</span>
+            <span class="badge info" id="panel-version-badge" style="margin-left:6px;">v2.0.0</span>
         </div>
         <div class="header-center">
             <div class="header-stat">
@@ -773,7 +774,7 @@
             </div>
             <div class="header-stat">
                 <span class="header-stat-dot blue"></span>
-                <span>版本</span>
+                <span title="CLIProxyAPI 版本（上游）">上游</span>
                 <span class="header-stat-value" id="header-version">-</span>
             </div>
             <div class="header-stat">
@@ -1647,6 +1648,15 @@
             document.getElementById('header-status-dot').className = 'header-stat-dot ' + (running ? 'green' : 'red');
             document.getElementById('header-version').textContent = d.version.current;
             document.getElementById('header-requests').textContent = d.requests.count;
+            if (d.panel) {
+                const badge = document.getElementById('panel-version-badge');
+                if (badge && d.panel.version) badge.textContent = d.panel.version;
+                if (d.panel.name && d.panel.version) {
+                    document.title = `${d.panel.name} 管理面板 ${d.panel.version}`;
+                } else if (d.panel.name) {
+                    document.title = `${d.panel.name} 管理面板`;
+                }
+            }
 
             const healthDot = document.getElementById('header-health-dot');
             const healthColors = { healthy: 'green', degraded: 'orange', unhealthy: 'red' };

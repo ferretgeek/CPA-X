@@ -1,4 +1,4 @@
-# CPA-XXX Admin Panel
+# CPA-X Admin Panel (v2.0.0)
 
 English | [中文](README_CN.md)
 
@@ -6,11 +6,12 @@ English | [中文](README_CN.md)
 
 - AI deployment guide: `AI_DEPLOY_CN.md`
 - Agent instructions: `AGENTS.md`
+- Release notes: `RELEASE_NOTES_v2.0.0.md`
 
-A monitoring and management panel for **CLIProxyAPI**, with light/dark dual themes, featuring health checks, resource monitoring, log viewing, update management, request statistics, and pricing display.
+A monitoring and management panel for **CLIProxyAPI**, featuring health checks, resource monitoring, logs, update management, request statistics, and pricing display.
 
-<img width="2555" height="1230" alt="CPA-XXX" src="https://github.com/user-attachments/assets/07a2ed19-7a93-4e43-9057-3d12f1737188" />
-<img width="2554" height="1228" alt="CPA-XXX-2" src="https://github.com/user-attachments/assets/0b1d502f-e66d-4a73-a55e-b50c4e6bf760" />
+<img width="2555" height="1230" alt="CPA-X" src="https://github.com/user-attachments/assets/07a2ed19-7a93-4e43-9057-3d12f1737188" />
+<img width="2554" height="1228" alt="CPA-X-2" src="https://github.com/user-attachments/assets/0b1d502f-e66d-4a73-a55e-b50c4e6bf760" />
 
 ## Requirements
 - **Recommended: Linux** (panel includes `systemctl` functionality)
