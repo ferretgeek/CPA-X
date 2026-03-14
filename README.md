@@ -2,7 +2,10 @@
 
 English | [中文](README_CN.md)
 
-(This panel is entirely a product of vibe coding. Initial build by opus-4.5, subsequent updates by gpt5.2-codex-high)
+**AI-first repo**: this project is primarily designed to be deployed and operated by AI agents (not humans).
+
+- AI deployment guide: `AI_DEPLOY_CN.md`
+- Agent instructions: `AGENTS.md`
 
 A monitoring and management panel for **CLIProxyAPI**, with light/dark dual themes, featuring health checks, resource monitoring, log viewing, update management, request statistics, and pricing display.
 
@@ -20,8 +23,11 @@ A monitoring and management panel for **CLIProxyAPI**, with light/dark dual them
 
 ### Option 1: One-Click Install (Recommended)
 ```bash
-# Linux (auto-registers systemd service)
+# Linux (auto-registers systemd service; installer best-effort auto-detects and fills `.env`)
 bash scripts/install.sh
+
+# Optional: run auto-detect again (recommended)
+python3 scripts/doctor.py --write-env
 ```
 
 ```powershell
@@ -61,7 +67,9 @@ Key configurations:
 - `CLIPROXY_PANEL_CLIPROXY_DIR` / `CLIPROXY_PANEL_CLIPROXY_CONFIG`
 - `CLIPROXY_PANEL_CLIPROXY_LOG`
 - `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `CLIPROXY_PANEL_CLIPROXY_API_PORT`
-- `CLIPROXY_PANEL_MANAGEMENT_KEY` (if CLIProxy API has a management key)
+- `CLIPROXY_PANEL_MANAGEMENT_KEY` / `CLIPROXY_PANEL_MODELS_API_KEY` (if upstream keys are enabled)
+- `CLIPROXY_PANEL_CLIPROXY_SERVICE` / `CLIPROXY_PANEL_CLIPROXY_BINARY` (required for auto-update)
+- `CLIPROXY_PANEL_GITHUB_TOKEN` (optional: higher GitHub rate limit, fewer `latest=unknown`)
 
 #### 4) Start the panel
 ```bash
