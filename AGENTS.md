@@ -60,6 +60,10 @@
   - `CLIPROXY_PANEL_BIND_HOST`：默认建议 `127.0.0.1`（只本机访问）；要开放到局域网再改 `0.0.0.0`
   - `CLIPROXY_PANEL_PANEL_ACCESS_KEY`：可选；设置后 `/api/*` 需要 `X-Panel-Key` 或 URL `?panel_key=...`
 
+- 费用估算（可选，但建议配置）
+  - `CLIPROXY_PANEL_PRICING_INPUT` / `CLIPROXY_PANEL_PRICING_OUTPUT` / `CLIPROXY_PANEL_PRICING_CACHE`：手动价格（美元/百万Tokens）
+  - `CLIPROXY_PANEL_PRICING_AUTO_ENABLED`：是否启用自动同步（默认开启；手动价格为 0 时会尝试从 OpenRouter 补齐）
+
 - CLIProxyAPI 对接
   - `CLIPROXY_PANEL_CLIPROXY_SERVICE`：systemd 服务名（自动更新/启动停止依赖它）
   - `CLIPROXY_PANEL_CLIPROXY_BINARY`：二进制路径（自动更新替换依赖它）

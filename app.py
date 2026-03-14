@@ -78,6 +78,10 @@ CONFIG = {
     'pricing_input': 0.0,
     'pricing_output': 0.0,
     'pricing_cache': 0.0,
+    # Token 价格自动同步（默认启用；当手动价格为 0 时会尝试从权威来源补齐）
+    'pricing_auto_enabled': True,
+    'pricing_auto_source': 'openrouter',  # 目前仅实现 openrouter
+    'pricing_auto_model': '',  # 为空时会从 config.yaml 里挑一个模型，最后回退到 openai/gpt-4o-mini
     'quotes_path': os.path.join(DATA_DIR, 'quotes.txt'),
     'disk_path': '/',
     # 安全默认：只监听本机。如需局域网访问，把 CLIPROXY_PANEL_BIND_HOST 改为 0.0.0.0
@@ -96,6 +100,7 @@ CONFIG_TYPES = {
     'pricing_input': float,
     'pricing_output': float,
     'pricing_cache': float,
+    'pricing_auto_enabled': bool,
 }
 
 
@@ -729,6 +734,159 @@ def compute_usage_costs(tokens, pricing):
     }
 
 
+def _parse_float_or_none(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _fetch_openrouter_models():
+    """
+    从 OpenRouter 获取模型列表（带长缓存）。
+    OpenRouter pricing 字段为“美元/Token”，本面板内部价格口径为“美元/百万Tokens”。
+    """
+    cache_key = 'openrouter_models_v1'
+    cached = cache.get(cache_key, max_age=6 * 3600)
+    if cached is not None:
+        return cached
+
+    url = 'https://openrouter.ai/api/v1/models'
+    try:
+        resp = requests.get(url, timeout=15, headers={'User-Agent': 'CPA-X Panel'})
+        resp.raise_for_status()
+        payload = resp.json() if resp.content else {}
+        models = payload.get('data', []) if isinstance(payload, dict) else []
+        if not isinstance(models, list):
+            models = []
+        cache.set(cache_key, models)
+        return models
+    except Exception as e:
+        print(f'Warning: failed to fetch openrouter models: {e}')
+        cache.set(cache_key, [])
+        return []
+
+
+def _openrouter_pricing_per_million(model_id: str):
+    if not model_id:
+        return None
+
+    models = _fetch_openrouter_models()
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        if (m.get('id') or '') != model_id:
+            continue
+        pricing = m.get('pricing') if isinstance(m.get('pricing'), dict) else {}
+        prompt = _parse_float_or_none(pricing.get('prompt'))
+        completion = _parse_float_or_none(pricing.get('completion'))
+        cache_read = _parse_float_or_none(pricing.get('input_cache_read'))
+
+        if prompt is None or completion is None:
+            return None
+
+        # OpenRouter pricing is USD/token; panel uses USD / 1M tokens
+        per_million = {
+            'input': prompt * 1_000_000,
+            'output': completion * 1_000_000,
+        }
+        # cached tokens price is optional
+        if cache_read is not None:
+            per_million['cache'] = cache_read * 1_000_000
+        else:
+            # 兜底：如果来源不提供 cache 价格，先按 input 计（用户可手动改）
+            per_million['cache'] = per_million['input']
+
+        return {
+            'pricing': per_million,
+            'model': model_id,
+            'source': 'openrouter',
+        }
+    return None
+
+
+def _pick_pricing_auto_model_id():
+    configured = (str(CONFIG.get('pricing_auto_model', '') or '').strip())
+    if configured:
+        return configured
+    # 尝试从 config.yaml 拿一个模型 id（不依赖上游接口）
+    try:
+        models, _ = get_models_from_config()
+        if isinstance(models, list) and models:
+            mid = (models[0].get('id') if isinstance(models[0], dict) else None) or ''
+            mid = str(mid).strip()
+            if mid:
+                return mid
+    except Exception:
+        pass
+    # 最终回退
+    return 'openai/gpt-4o-mini'
+
+
+def get_effective_pricing():
+    """
+    返回本次用于展示/计算的价格（USD / 1M tokens）。
+    规则：
+    - 手动价格 > 0：优先使用手动
+    - 手动价格为 0：且开启自动同步时，尝试从来源补齐（目前为 OpenRouter）
+    """
+    manual = {
+        'input': _safe_float(CONFIG.get('pricing_input', 0.0)),
+        'output': _safe_float(CONFIG.get('pricing_output', 0.0)),
+        'cache': _safe_float(CONFIG.get('pricing_cache', 0.0)),
+    }
+
+    meta = {
+        'mode': 'manual',
+        'source': 'manual',
+        'model': None,
+        'fields': {'input': 'manual', 'output': 'manual', 'cache': 'manual'},
+        'auto_enabled': _parse_bool(CONFIG.get('pricing_auto_enabled', True)),
+        'auto_source': str(CONFIG.get('pricing_auto_source', 'openrouter') or 'openrouter').strip().lower(),
+        'auto_model': (str(CONFIG.get('pricing_auto_model', '') or '').strip() or None),
+    }
+
+    if not _parse_bool(CONFIG.get('pricing_auto_enabled', True)):
+        return manual, meta
+
+    need_auto = any(manual.get(k, 0.0) <= 0 for k in ('input', 'output', 'cache'))
+    if not need_auto:
+        return manual, meta
+
+    source = str(CONFIG.get('pricing_auto_source', 'openrouter') or 'openrouter').strip().lower()
+    if source != 'openrouter':
+        return manual, meta
+
+    model_id = _pick_pricing_auto_model_id()
+    suggested = _openrouter_pricing_per_million(model_id)
+    if not suggested:
+        # 如果 config.yaml 挑的模型在 OpenRouter 找不到，尝试回退到固定模型
+        if model_id != 'openai/gpt-4o-mini':
+            suggested = _openrouter_pricing_per_million('openai/gpt-4o-mini')
+    if not suggested:
+        return manual, meta
+
+    eff = dict(manual)
+    fields = dict(meta['fields'])
+    for k in ('input', 'output', 'cache'):
+        if eff.get(k, 0.0) <= 0:
+            eff[k] = _safe_float(suggested['pricing'].get(k, eff[k]))
+            fields[k] = 'openrouter'
+
+    meta = {
+        'mode': 'mixed' if any(v == 'openrouter' for v in fields.values()) and any(v == 'manual' for v in fields.values()) else 'auto',
+        'source': suggested.get('source', 'openrouter'),
+        'model': suggested.get('model'),
+        'fields': fields,
+        'auto_enabled': True,
+        'auto_source': source,
+        'auto_model': (str(CONFIG.get('pricing_auto_model', '') or '').strip() or None),
+    }
+    return eff, meta
+
+
 def import_usage_snapshot(snapshot):
     if not snapshot:
         return False
@@ -1159,6 +1317,9 @@ def _get_local_version_from_management():
         if not header_value:
             return None
         version = _decorate_version_tag(header_value)
+        # 避免把上游的 dev/unknown 当成“可用版本”
+        if _normalize_release_version(version) in {'unknown', 'dev', ''}:
+            return None
         if version:
             cache.set(cache_key, version)
             return version
@@ -1174,6 +1335,37 @@ def _is_git_repo(path):
         return False
 
 
+def _is_semver_like(version) -> bool:
+    """是否看起来像 release 版本号（支持 v 前缀）"""
+    normalized = _normalize_release_version(version)
+    if not normalized or normalized in {'unknown', 'dev'}:
+        return False
+    return bool(re.match(r'^\d+(\.\d+){1,3}$', str(normalized)))
+
+
+def _get_last_successful_release_version_from_history():
+    """从 update_history.json 中取最近一次成功更新的 release 版本号（用于兜底显示）"""
+    try:
+        path = UPDATE_HISTORY_PATH
+        if not path or not os.path.exists(path):
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            history = json.load(f)
+        if not isinstance(history, list):
+            return None
+        for entry in reversed(history):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get('success') is not True:
+                continue
+            v = entry.get('version')
+            if _is_semver_like(v):
+                return _decorate_version_tag(v)
+    except Exception:
+        return None
+    return None
+
+
 def get_local_version():
     """获取本地版本号"""
     cache_key = 'local_version'
@@ -1181,40 +1373,58 @@ def get_local_version():
     if cached:
         return cached
 
+    mgmt_candidate = None
+
     # 1) 优先：从管理接口读取（适配 release 二进制安装场景）
     mgmt_version = _get_local_version_from_management()
     if mgmt_version:
-        cache.set(cache_key, mgmt_version)
-        return mgmt_version
+        # 如果是规范的 release 版本号，直接返回
+        if _is_semver_like(mgmt_version):
+            cache.set(cache_key, mgmt_version)
+            return mgmt_version
+        mgmt_candidate = mgmt_version
 
     # 2) 其次：本地 git 仓库
-    if not (_is_git_repo(CONFIG.get('cliproxy_dir')) and command_available('git')):
-        cache.set(cache_key, 'unknown')
-        return 'unknown'
+    cliproxy_dir = CONFIG.get('cliproxy_dir')
+    if _is_git_repo(cliproxy_dir) and command_available('git'):
+        # 确保本地有最新的 tag 信息
+        run_cmd(f'cd {cliproxy_dir} && git fetch --tags 2>/dev/null', timeout=10)
 
-    # 确保本地有最新的 tag 信息
-    run_cmd(f'cd {CONFIG["cliproxy_dir"]} && git fetch --tags 2>/dev/null', timeout=10)
+        version_file = os.path.join(cliproxy_dir, 'VERSION')
+        if os.path.exists(version_file):
+            try:
+                with open(version_file, 'r') as f:
+                    version = f.read().strip()
+                    if version and _is_semver_like(version):
+                        decorated = _decorate_version_tag(version)
+                        cache.set(cache_key, decorated)
+                        return decorated
+            except Exception:
+                pass
 
-    version_file = os.path.join(CONFIG['cliproxy_dir'], 'VERSION')
-    if os.path.exists(version_file):
-        try:
-            with open(version_file, 'r') as f:
-                version = f.read().strip()
-                if version:
-                    cache.set(cache_key, version)
-                    return version
-        except:
-            pass
+        ok, stdout, _ = run_cmd(f'cd {cliproxy_dir} && git describe --tags --abbrev=0 2>/dev/null')
+        if ok and stdout and _is_semver_like(stdout):
+            decorated = _decorate_version_tag(stdout)
+            cache.set(cache_key, decorated)
+            return decorated
 
-    _, stdout, _ = run_cmd(f'cd {CONFIG["cliproxy_dir"]} && git describe --tags --abbrev=0 2>/dev/null')
-    if stdout:
-        cache.set(cache_key, stdout)
-        return stdout
+        ok, stdout, _ = run_cmd(f'cd {cliproxy_dir} && git rev-parse --short HEAD 2>/dev/null')
+        if ok and stdout:
+            mgmt_candidate = mgmt_candidate or stdout
 
-    _, stdout, _ = run_cmd(f'cd {CONFIG["cliproxy_dir"]} && git rev-parse --short HEAD')
-    result = stdout if stdout else 'dev'
-    cache.set(cache_key, result)
-    return result
+    # 3) 兜底：如果上游/本地无法得到 release 版本号，尝试从更新历史中读取
+    history_version = _get_last_successful_release_version_from_history()
+    if history_version:
+        cache.set(cache_key, history_version)
+        return history_version
+
+    # 4) 再兜底：如果管理接口返回了 hash 等信息，至少返回它；否则 unknown
+    if mgmt_candidate:
+        cache.set(cache_key, mgmt_candidate)
+        return mgmt_candidate
+
+    cache.set(cache_key, 'unknown')
+    return 'unknown'
 
 def _reset_log_stats_state():
     with log_stats_lock:
@@ -1450,7 +1660,7 @@ def check_for_updates(use_cache=True):
     # 用规范化结果比较，避免 v 前缀导致误判
     current_norm = _normalize_release_version(current_display)
     latest_norm = _normalize_release_version(latest_display)
-    result = current_norm != latest_norm and latest_norm not in {'unknown', ''} and current_norm not in {'unknown', ''}
+    result = current_norm != latest_norm and latest_norm not in {'unknown', '', 'dev'} and current_norm not in {'unknown', '', 'dev'}
     # 只缓存判断结果，不阻断 state 更新（否则 UI 可能卡在 unknown）
     if use_cache:
         cache.set('update_check', result)
@@ -1495,6 +1705,7 @@ def perform_update():
         cliproxy_dir = CONFIG.get('cliproxy_dir')
         cliproxy_bin = CONFIG.get('cliproxy_binary') or ''
         backup_path = None
+        updated_release_version = None
 
         use_source_update = _is_git_repo(cliproxy_dir) and command_available('git') and command_available('go')
 
@@ -1535,7 +1746,7 @@ def perform_update():
                 return False, result
 
             result['details'].append('Downloading latest release...')
-            ok, msg = update_from_github_release(binary_path=cliproxy_bin)
+            ok, msg, updated_release_version = update_from_github_release(binary_path=cliproxy_bin)
             if not ok:
                 result['message'] = msg or 'Release update failed'
                 run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
@@ -1585,6 +1796,9 @@ def perform_update():
         state['last_update_time'] = datetime.now().isoformat()
         state['last_update_result'] = result
         state['current_version'] = get_local_version()
+        # 如果本地/上游返回的是 unknown/hash 等，优先用本次 release 更新的版本号展示
+        if updated_release_version and not _is_semver_like(state.get('current_version')):
+            state['current_version'] = _decorate_version_tag(updated_release_version)
 
         # 记录更新历史
         try:
@@ -1624,10 +1838,12 @@ def update_from_github_release(binary_path=''):
     """
     下载并安装 CLIProxyAPI 最新 release（二进制安装场景）。
     依赖：systemd + curl/requests 可用；需要当前进程有写入 binary_path 的权限（通常为 root）。
+
+    返回：(ok, message, release_tag)
     """
     try:
         if not binary_path:
-            return False, 'Binary path not set'
+            return False, 'Binary path not set', None
 
         goarch = _guess_goarch()
 
@@ -1654,6 +1870,8 @@ def update_from_github_release(binary_path=''):
             data = {}
             print(f'Warning: failed to fetch release info via GitHub API: {e}')
 
+        resolved_tag = _decorate_version_tag((data.get('tag_name') or '') if isinstance(data, dict) else '')
+
         assets = data.get('assets', []) if isinstance(data, dict) else []
 
         asset_url = ''
@@ -1670,17 +1888,21 @@ def update_from_github_release(binary_path=''):
 
         # 2) 回退：如果 API 拿不到资产列表（被限流/网络问题），用 tag + 固定命名规则拼装下载链接
         if not asset_url:
-            tag = get_github_release_version()
-            tag_display = _decorate_version_tag(tag)
+            if not resolved_tag:
+                resolved_tag = _decorate_version_tag(get_github_release_version())
+            tag_display = resolved_tag
             tag_number = _normalize_release_version(tag_display)
             if not tag_number or tag_number in {'unknown', 'dev'}:
                 if api_error:
-                    return False, f'Failed to fetch latest release info (GitHub API limited): {api_error}'
-                return False, 'Failed to resolve latest release tag'
+                    return False, f'Failed to fetch latest release info (GitHub API limited): {api_error}', None
+                return False, 'Failed to resolve latest release tag', None
 
             asset_name = f'CLIProxyAPI_{tag_number}_linux_{goarch}.tar.gz'
             asset_url = f'https://github.com/{repo}/releases/download/{tag_display}/{asset_name}'
             checksum_url = f'https://github.com/{repo}/releases/download/{tag_display}/checksums.txt'
+        elif not resolved_tag:
+            # 极端兜底：有 asset_url 但拿不到 tag（理论上不应发生）
+            resolved_tag = _decorate_version_tag(get_github_release_version())
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tar_path = os.path.join(tmpdir, 'cliproxyapi.tar.gz')
@@ -1712,7 +1934,7 @@ def update_from_github_release(binary_path=''):
                                 h.update(chunk)
                         actual = h.hexdigest()
                         if actual.lower() != expected.lower():
-                            return False, 'Checksum mismatch (download may be corrupted)'
+                            return False, 'Checksum mismatch (download may be corrupted)', resolved_tag or None
                 except Exception as e:
                     # 不阻断更新，但记录一下
                     print(f'Warning: checksum verify skipped/failed: {e}')
@@ -1730,7 +1952,7 @@ def update_from_github_release(binary_path=''):
                 with tarfile.open(tar_path, 'r:gz') as tf:
                     _safe_extract(tf, tmpdir)
             except Exception as e:
-                return False, f'Extract failed: {e}'
+                return False, f'Extract failed: {e}', resolved_tag or None
 
             def _looks_like_elf(path: str) -> bool:
                 try:
@@ -1799,7 +2021,7 @@ def update_from_github_release(binary_path=''):
 
             extracted_bin = _find_extracted_binary(tmpdir)
             if not extracted_bin:
-                return False, 'No binary found in release package'
+                return False, 'No binary found in release package', resolved_tag or None
 
             # 原子替换
             tmp_target = f'{binary_path}.tmp'
@@ -1807,9 +2029,10 @@ def update_from_github_release(binary_path=''):
             os.chmod(tmp_target, 0o755)
             os.replace(tmp_target, binary_path)
 
-        return True, f'Release updated for linux_{goarch}'
+        tag_for_message = resolved_tag or 'unknown'
+        return True, f'Release updated to {tag_for_message} for linux_{goarch}', resolved_tag or None
     except Exception as e:
-        return False, f'Release update error: {e}'
+        return False, f'Release update error: {e}', None
 
 def auto_update_worker():
     while True:
@@ -2459,11 +2682,7 @@ def api_status():
     log_requests = get_request_count_from_logs()
     snapshot = fetch_usage_snapshot()
     token_totals, usage_reqs = aggregate_usage_snapshot(snapshot)
-    pricing = {
-        'input': _safe_float(CONFIG.get('pricing_input', 0.0)),
-        'output': _safe_float(CONFIG.get('pricing_output', 0.0)),
-        'cache': _safe_float(CONFIG.get('pricing_cache', 0.0)),
-    }
+    pricing, pricing_meta = get_effective_pricing()
 
     # 获取当前 CLIProxyAPI 的值
     current_input = token_totals.get('input_tokens', 0)
@@ -2592,6 +2811,7 @@ def api_status():
             'check_interval': CONFIG['auto_update_check_interval']
         },
         'pricing': pricing,
+        'pricing_meta': pricing_meta,
         'usage_costs': usage_costs,
         'paths': get_paths_info(),
         'health': state['health_status']
@@ -2782,6 +3002,19 @@ def api_set_check_interval():
     return jsonify({'success': True, 'check_interval': CONFIG['auto_update_check_interval']})
 
 
+@app.route('/api/config/pricing-auto', methods=['POST'])
+def api_set_pricing_auto():
+    """开启/关闭 Token 价格自动同步（默认开启；关闭后严格使用手动价格）"""
+    data = request.json or {}
+    enabled_raw = data.get('enabled', CONFIG.get('pricing_auto_enabled', True))
+    enabled = enabled_raw if isinstance(enabled_raw, bool) else _parse_bool(enabled_raw)
+    CONFIG['pricing_auto_enabled'] = enabled
+    _update_dotenv_values({'pricing_auto_enabled': enabled})
+    # 返回当前 effective 价格，方便前端立即刷新显示
+    effective, pricing_meta = get_effective_pricing()
+    return jsonify({'success': True, 'pricing_auto_enabled': enabled, 'effective_pricing': effective, 'pricing_meta': pricing_meta})
+
+
 @app.route('/api/pricing', methods=['GET', 'POST'])
 def api_pricing():
     if request.method == 'POST':
@@ -2797,15 +3030,26 @@ def api_pricing():
             'pricing_output': output_price,
             'pricing_cache': cache_price,
         })
-        return jsonify({'success': True, 'pricing': {'input': input_price, 'output': output_price, 'cache': cache_price}})
+        # 手动保存后，effective 价格也会随之变化（除非仍为 0 且开启自动同步）
+        effective, pricing_meta = get_effective_pricing()
+        return jsonify({
+            'success': True,
+            'pricing': {'input': input_price, 'output': output_price, 'cache': cache_price},
+            'effective_pricing': effective,
+            'pricing_meta': pricing_meta,
+        })
 
+    manual = {
+        'input': _safe_float(CONFIG.get('pricing_input', 0.0)),
+        'output': _safe_float(CONFIG.get('pricing_output', 0.0)),
+        'cache': _safe_float(CONFIG.get('pricing_cache', 0.0)),
+    }
+    effective, pricing_meta = get_effective_pricing()
     return jsonify({
         'success': True,
-        'pricing': {
-            'input': _safe_float(CONFIG.get('pricing_input', 0.0)),
-            'output': _safe_float(CONFIG.get('pricing_output', 0.0)),
-            'cache': _safe_float(CONFIG.get('pricing_cache', 0.0)),
-        }
+        'pricing': manual,
+        'effective_pricing': effective,
+        'pricing_meta': pricing_meta,
     })
 
 
