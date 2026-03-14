@@ -1,5 +1,6 @@
 {
-  "name": "CPA-XXX",
+  "name": "CPA-X",
+  "version": "2.0.0",
   "description": "CLIProxyAPI 管理面板",
   "language": "python",
   "entrypoint": "app.py",
