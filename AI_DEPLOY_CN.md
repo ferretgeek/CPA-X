@@ -119,5 +119,5 @@ systemctl restart cliproxy-panel
 
 ## 6) 安全默认值（AI 不要破坏）
 
-- 默认 `CLIPROXY_PANEL_BIND_HOST=127.0.0.1`
+- 当前默认 `CLIPROXY_PANEL_BIND_HOST=0.0.0.0`
 - 如需外网访问，建议同时设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`

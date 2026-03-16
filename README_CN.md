@@ -1,4 +1,4 @@
-# CPA-X 管理面板（v2.0.0）
+# CPA-X 管理面板（v2.1.0）
 
 [English](README.md) | 中文
 
@@ -7,7 +7,7 @@
 > **AI 优先**：本仓库主要面向 AI Agent 部署/运维（而不是人类手动部署）。
 > - AI 部署手册：`AI_DEPLOY_CN.md`
 > - Agent 指引：`AGENTS.md`
-> - 更新说明：`RELEASE_NOTES_v2.0.0.md`
+> - 更新说明：`RELEASE_NOTES_v2.1.0.md`
 
 ## 适用环境
 - **推荐：Linux**（面板含 `systemctl` 相关功能）
@@ -107,7 +107,7 @@ docker compose up -d --build
 ## 安全提示
 - **不要把 `.env` 提交到仓库**（已在 `.gitignore` 中忽略）
 - 管理密钥、模型密钥等敏感字段请只放在 `.env`
-- 如果面板只用于本机，建议把 `CLIPROXY_PANEL_BIND_HOST` 设为 `127.0.0.1`，避免局域网/公网访问
+- 面板当前默认监听 `0.0.0.0`，方便局域网访问；如果只用于本机，建议把 `CLIPROXY_PANEL_BIND_HOST` 改成 `127.0.0.1`
 - 如需对面板加一道访问门槛，可设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`（启用后 `/api/*` 需要 `X-Panel-Key` 或 URL 参数 `panel_key`）
 
 ## 许可协议

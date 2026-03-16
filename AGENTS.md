@@ -57,7 +57,7 @@
 
 - 面板自身
   - `CLIPROXY_PANEL_PANEL_PORT`：面板端口
-  - `CLIPROXY_PANEL_BIND_HOST`：默认建议 `127.0.0.1`（只本机访问）；要开放到局域网再改 `0.0.0.0`
+  - `CLIPROXY_PANEL_BIND_HOST`：当前默认 `0.0.0.0`（方便局域网访问）；如只本机访问可改成 `127.0.0.1`
   - `CLIPROXY_PANEL_PANEL_ACCESS_KEY`：可选；设置后 `/api/*` 需要 `X-Panel-Key` 或 URL `?panel_key=...`
 
 - 费用估算（可选，但建议配置）
