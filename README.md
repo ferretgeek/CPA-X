@@ -1,4 +1,4 @@
-# CPA-X Admin Panel (v2.0.0)
+# CPA-X Admin Panel (v2.1.0)
 
 English | [中文](README_CN.md)
 
@@ -6,7 +6,7 @@ English | [中文](README_CN.md)
 
 - AI deployment guide: `AI_DEPLOY_CN.md`
 - Agent instructions: `AGENTS.md`
-- Release notes: `RELEASE_NOTES_v2.0.0.md`
+- Release notes: `RELEASE_NOTES_v2.1.0.md`
 
 A monitoring and management panel for **CLIProxyAPI**, featuring health checks, resource monitoring, logs, update management, request statistics, and pricing display.
 
@@ -114,7 +114,7 @@ This is a Linux-only feature. On Windows, it will fail gracefully without affect
 ## Security Notes
 - **Do not commit `.env` to the repository** (already in `.gitignore`)
 - Keep management keys and model keys only in `.env`
-- If you only use the panel locally, set `CLIPROXY_PANEL_BIND_HOST=127.0.0.1` to avoid LAN/public access
+- Default bind host is `0.0.0.0` for LAN-friendly deployment. If you only use the panel locally, set `CLIPROXY_PANEL_BIND_HOST=127.0.0.1`
 - For an extra protection layer, set `CLIPROXY_PANEL_PANEL_ACCESS_KEY` (then `/api/*` requires `X-Panel-Key` or URL query `panel_key`)
 
 ## License

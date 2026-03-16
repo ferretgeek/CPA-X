@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CPA-X 管理面板后端 v2.0.0
+CPA-X 管理面板后端 v2.1.0
 功能: 为 CLIProxyAPI 提供监控统计、健康检查、资源监控、配置管理、API测试、模型管理
 优化: 缓存机制、预编译正则、非阻塞监控、减少shell调用
 """
@@ -24,7 +24,7 @@ import requests
 
 # 面板自身版本（与 GitHub Release/README 同步）
 PANEL_NAME = "CPA-X"
-PANEL_VERSION = "2.0.0"
+PANEL_VERSION = "2.1.0"
 
 # ==================== 预编译正则表达式 ====================
 # 日志格式: [2026-01-17 05:21:09] [--------] [info ] [gin_logger.go:92] 200 |            0s |       127.0.0.1 | GET     "/v1/models"
@@ -88,8 +88,8 @@ CONFIG = {
     'pricing_auto_model': '',  # 为空时会从 config.yaml 里挑一个模型，最后回退到 openai/gpt-4o-mini
     'quotes_path': os.path.join(DATA_DIR, 'quotes.txt'),
     'disk_path': '/',
-    # 安全默认：只监听本机。如需局域网访问，把 CLIPROXY_PANEL_BIND_HOST 改为 0.0.0.0
-    'bind_host': '127.0.0.1',
+    # 默认监听全部网卡，保持面板部署后可从局域网访问；如需仅本机访问，可显式设置为 127.0.0.1
+    'bind_host': '0.0.0.0',
     'panel_access_key': '',
 }
 
@@ -277,6 +277,8 @@ state = {
     'update_in_progress': False,
     'last_update_time': None,
     'last_update_result': None,
+    'last_auto_update_check_time': None,
+    'next_auto_update_check_time': None,
     'current_version': 'unknown',
     'latest_version': 'unknown',
     'auto_update_enabled': CONFIG['auto_update_enabled'],
@@ -1681,21 +1683,87 @@ def check_for_updates(use_cache=True):
 
 def is_idle():
     """检查系统是否空闲（基于日志中的最后请求时间）"""
-    # 从日志获取最后请求时间
-    stats = get_request_count_from_logs()
+    return get_idle_state().get('is_idle', True)
+
+
+def get_idle_state(stats=None):
+    """返回当前空闲状态及剩余等待时间。"""
+    if stats is None:
+        stats = get_request_count_from_logs()
+
     last_time_str = stats.get('last_time')
+    idle_threshold = max(0, int(CONFIG.get('idle_threshold_seconds', 0) or 0))
+    result = {
+        'is_idle': True,
+        'last_request_time': last_time_str,
+        'idle_threshold_seconds': idle_threshold,
+        'idle_for_seconds': None,
+        'idle_wait_seconds': 0,
+    }
 
     if not last_time_str:
-        return True  # 没有请求记录，认为空闲
+        return result
 
     try:
-        # 解析时间字符串 "2026-01-18 23:56:20"
         last_time = datetime.strptime(last_time_str, '%Y-%m-%d %H:%M:%S')
-        # 服务器使用UTC时间，计算空闲秒数
-        idle_seconds = (datetime.utcnow() - last_time).total_seconds()
-        return idle_seconds > CONFIG['idle_threshold_seconds']
-    except:
-        return True  # 解析失败，认为空闲
+        idle_seconds = max(0, int((datetime.now() - last_time).total_seconds()))
+        idle_wait_seconds = max(0, idle_threshold - idle_seconds)
+        result['idle_for_seconds'] = idle_seconds
+        result['idle_wait_seconds'] = idle_wait_seconds
+        result['is_idle'] = idle_wait_seconds == 0
+        return result
+    except Exception:
+        return result
+
+
+def get_auto_update_state(has_update=None, stats=None):
+    """返回自动更新当前所处阶段，供前端直接展示。"""
+    if stats is None:
+        stats = get_request_count_from_logs()
+    if has_update is None:
+        has_update = check_for_updates()
+
+    idle_state = get_idle_state(stats)
+    next_check_time = state.get('next_auto_update_check_time')
+    next_check_in_seconds = None
+    if next_check_time:
+        try:
+            next_check_dt = datetime.fromisoformat(next_check_time)
+            next_check_in_seconds = max(0, int((next_check_dt - datetime.now()).total_seconds()))
+        except Exception:
+            next_check_in_seconds = None
+
+    summary = '等待状态更新'
+    phase = 'unknown'
+    if not state.get('auto_update_enabled', False):
+        phase = 'disabled'
+        summary = '自动更新已关闭'
+    elif state.get('update_in_progress'):
+        phase = 'updating'
+        summary = '正在执行自动更新'
+    elif not has_update:
+        phase = 'no_update'
+        summary = '已是最新版本'
+    elif not idle_state.get('is_idle'):
+        phase = 'wait_idle'
+        summary = f'还需空闲 {idle_state.get("idle_wait_seconds", 0)} 秒'
+    elif next_check_in_seconds is not None and next_check_in_seconds > 0:
+        phase = 'wait_check'
+        summary = f'{next_check_in_seconds} 秒后进行下一次检查'
+    else:
+        phase = 'ready'
+        summary = '已满足自动更新条件'
+
+    return {
+        'phase': phase,
+        'summary': summary,
+        'can_update_now': phase == 'ready',
+        'has_update': has_update,
+        'last_check_time': state.get('last_auto_update_check_time'),
+        'next_check_time': next_check_time,
+        'next_check_in_seconds': next_check_in_seconds,
+        'idle': idle_state,
+    }
 
 def perform_update():
     if state['update_in_progress']:
@@ -2053,19 +2121,35 @@ def update_from_github_release(binary_path=''):
 
 def auto_update_worker():
     while True:
-        time.sleep(CONFIG['auto_update_check_interval'])
+        interval = max(60, int(CONFIG.get('auto_update_check_interval', 300) or 300))
+        state['next_auto_update_check_time'] = (datetime.now() + timedelta(seconds=interval)).isoformat()
+        time.sleep(interval)
+        state['last_auto_update_check_time'] = datetime.now().isoformat()
 
         if not state['auto_update_enabled']:
+            print(f'[{datetime.now()}] Auto-update skipped: disabled')
             continue
 
         if state['update_in_progress']:
+            print(f'[{datetime.now()}] Auto-update skipped: update already in progress')
             continue
 
         try:
             has_update = check_for_updates()
-            if has_update and is_idle():
+            if not has_update:
+                print(f'[{datetime.now()}] Auto-update check: no new release')
+                continue
+
+            idle_state = get_idle_state()
+            if idle_state.get('is_idle'):
                 print(f'[{datetime.now()}] Update detected and system idle, starting auto-update...')
                 perform_update()
+            else:
+                print(
+                    f'[{datetime.now()}] Auto-update skipped: busy, '
+                    f'last request at {idle_state.get("last_request_time")}, '
+                    f'threshold={CONFIG["idle_threshold_seconds"]}s'
+                )
         except Exception as e:
             print(f'[{datetime.now()}] Auto-update check failed: {e}')
 
@@ -2798,6 +2882,8 @@ def api_status():
     final_count = display_total_requests if display_total_requests > 0 else log_requests.get('count', 0)
     final_success = display_success if display_success > 0 else log_requests.get('success', 0)
     final_failed = display_failure if display_failure > 0 else log_requests.get('failed', 0)
+    idle_state = get_idle_state(log_requests)
+    auto_update_state = get_auto_update_state(has_update=has_update, stats=log_requests)
 
     return jsonify({
         'panel': {
@@ -2815,7 +2901,7 @@ def api_status():
             'last_time': log_requests.get('last_time'),
             'success': final_success,
             'failed': final_failed,
-            'is_idle': is_idle(),
+            'is_idle': idle_state.get('is_idle', True),
             'input_tokens': display_input_tokens,
             'output_tokens': display_output_tokens,
             'cached_tokens': display_cached_tokens,
@@ -2825,7 +2911,8 @@ def api_status():
             'in_progress': state['update_in_progress'],
             'last_time': state['last_update_time'],
             'last_result': state['last_update_result'],
-            'auto_enabled': state['auto_update_enabled']
+            'auto_enabled': state['auto_update_enabled'],
+            'status': auto_update_state,
         },
         'config': {
             'idle_threshold': CONFIG['idle_threshold_seconds'],

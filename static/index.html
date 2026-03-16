@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CPA-X 管理面板</title>
+    <title>CPA-X 管理面板 v2.1.0</title>
     <meta name="theme-color" content="#0c1222">
     <link rel="icon" href="/favicon.ico" sizes="any">
     <link rel="shortcut icon" href="/favicon.ico">
@@ -764,7 +764,7 @@
                 <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
             </div>
             <span class="logo-text">CPA-X</span>
-            <span class="badge info" id="panel-version-badge" style="margin-left:6px;">v2.0.0</span>
+            <span class="badge info" id="panel-version-badge" style="margin-left:6px;">v2.1.0</span>
         </div>
         <div class="header-center">
             <div class="header-stat">
@@ -1024,6 +1024,13 @@
                             <input type="number" id="idle-input" class="input" style="width:70px;" value="30" min="1">
                             <span style="font-size:11px;color:var(--text-muted);">分钟</span>
                         </div>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">当前状态</span>
+                        <span id="auto-status-line" class="badge info">等待数据</span>
+                    </div>
+                    <div id="auto-status-detail" style="font-size:11px;color:var(--text-muted);line-height:1.6;padding-top:2px;">
+                        正在读取自动更新状态...
                     </div>
                     <div class="btn-group">
                         <button class="btn btn-ghost btn-sm" onclick="saveUpdateSettings()" style="flex:1;">保存设置</button>
@@ -1383,6 +1390,30 @@
         function formatUsdShort(value) {
             const num = Number(value || 0);
             return `${num.toFixed(1)}`;
+        }
+
+        function formatDurationCn(value) {
+            const total = Math.max(0, Math.round(Number(value || 0)));
+            if (total <= 0) return '0秒';
+            const days = Math.floor(total / 86400);
+            const hours = Math.floor((total % 86400) / 3600);
+            const minutes = Math.floor((total % 3600) / 60);
+            const seconds = total % 60;
+            if (days > 0) return `${days}天${hours}小时`;
+            if (hours > 0) return `${hours}小时${minutes}分钟`;
+            if (minutes > 0) return `${minutes}分钟${seconds}秒`;
+            return `${seconds}秒`;
+        }
+
+        function formatDateTimeCn(value) {
+            if (!value) return '-';
+            try {
+                const dt = new Date(value);
+                if (Number.isNaN(dt.getTime())) return value;
+                return dt.toLocaleString('zh-CN', { hour12: false });
+            } catch (e) {
+                return value;
+            }
         }
 
         function applySummarySizing(el) {
@@ -1774,6 +1805,53 @@
                 if (!isNaN(idleLocal) && !isNaN(checkLocal) && idleLocal === idleServer && checkLocal === checkServer) {
                     updateSettingsDirty = false;
                 }
+            }
+
+            const autoStatus = d.update?.status || {};
+            const autoIdle = autoStatus.idle || {};
+            const autoStatusLine = document.getElementById('auto-status-line');
+            const autoStatusDetail = document.getElementById('auto-status-detail');
+            if (autoStatusLine) {
+                let statusText = autoStatus.summary || '等待状态更新';
+                let statusClass = 'info';
+                const phase = autoStatus.phase || 'unknown';
+                if (phase === 'disabled') {
+                    statusClass = 'warning';
+                } else if (phase === 'updating' || d.update.in_progress) {
+                    statusClass = 'warning';
+                } else if (phase === 'no_update') {
+                    statusClass = 'success';
+                } else if (phase === 'wait_idle') {
+                    statusClass = 'warning';
+                } else if (phase === 'ready') {
+                    statusClass = 'success';
+                }
+                autoStatusLine.className = `badge ${statusClass}`;
+                autoStatusLine.textContent = statusText;
+            }
+            if (autoStatusDetail) {
+                const detailParts = [];
+                if (autoStatus.has_update) {
+                    detailParts.push(`发现新版本：${d.version.current} → ${d.version.latest}`);
+                } else {
+                    detailParts.push('当前没有可安装的新版本');
+                }
+                if (autoIdle.last_request_time) {
+                    if (autoIdle.is_idle) {
+                        detailParts.push(`最近请求在 ${autoIdle.last_request_time}，已空闲 ${formatDurationCn(autoIdle.idle_for_seconds || 0)}`);
+                    } else {
+                        detailParts.push(`最近请求在 ${autoIdle.last_request_time}，还需空闲 ${formatDurationCn(autoIdle.idle_wait_seconds || 0)}`);
+                    }
+                } else {
+                    detailParts.push('暂无请求记录，当前视为空闲');
+                }
+                if (d.update.auto_enabled && typeof autoStatus.next_check_in_seconds === 'number') {
+                    detailParts.push(`下一次自动检查约在 ${formatDurationCn(autoStatus.next_check_in_seconds)} 后`);
+                }
+                if (autoStatus.last_check_time) {
+                    detailParts.push(`上次自动检查时间：${formatDateTimeCn(autoStatus.last_check_time)}`);
+                }
+                autoStatusDetail.textContent = detailParts.join('；');
             }
 
             // 健康状态
