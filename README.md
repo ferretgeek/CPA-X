@@ -1,4 +1,4 @@
-# CPA-X Admin Panel (v2.1.0)
+# CPA-X Admin Panel (v2.1.1)
 
 English | [中文](README_CN.md)
 
@@ -6,7 +6,7 @@ English | [中文](README_CN.md)
 
 - AI deployment guide: `AI_DEPLOY_CN.md`
 - Agent instructions: `AGENTS.md`
-- Release notes: `RELEASE_NOTES_v2.1.0.md`
+- Release notes: `RELEASE_NOTES_v2.1.1.md`
 
 A monitoring and management panel for **CLIProxyAPI**, featuring health checks, resource monitoring, logs, update management, request statistics, and pricing display.
 

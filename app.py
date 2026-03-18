@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CPA-X 管理面板后端 v2.1.0
+CPA-X 管理面板后端 v2.1.1
 功能: 为 CLIProxyAPI 提供监控统计、健康检查、资源监控、配置管理、API测试、模型管理
 优化: 缓存机制、预编译正则、非阻塞监控、减少shell调用
 """
@@ -25,7 +25,7 @@ import requests
 
 # 面板自身版本（与 GitHub Release/README 同步）
 PANEL_NAME = "CPA-X"
-PANEL_VERSION = "2.1.0"
+PANEL_VERSION = "2.1.1"
 PRICING_BASIS_TOKENS = 1_000_000
 PRICING_BASIS_LABEL = '百万Tokens'
 PRICING_BASIS_TEXT = f'美元/{PRICING_BASIS_LABEL}'
