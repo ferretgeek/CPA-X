@@ -5,7 +5,7 @@
 - 面板可访问（静态页面 + `/api/*` 正常）
 - 统计数据正确（input/output/cached/total）
 - 自动更新可用（能停止/替换二进制/拉起服务）
-- 配置/日志/模型等功能都能用
+- 配置查看/校验、日志、模型等功能都能用
 
 ## 1) 最快可用（推荐路径）
 
@@ -59,6 +59,7 @@
   - `CLIPROXY_PANEL_PANEL_PORT`：面板端口
   - `CLIPROXY_PANEL_BIND_HOST`：当前默认 `0.0.0.0`（方便局域网访问）；如只本机访问可改成 `127.0.0.1`
   - `CLIPROXY_PANEL_PANEL_ACCESS_KEY`：可选；设置后 `/api/*` 需要 `X-Panel-Key` 或 URL `?panel_key=...`
+  - `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED`：主配置写回开关；默认 `false`，只有你明确接受风险时才改成 `true`
 
 - 费用估算（可选，但建议配置）
   - `CLIPROXY_PANEL_PRICING_INPUT` / `CLIPROXY_PANEL_PRICING_OUTPUT` / `CLIPROXY_PANEL_PRICING_CACHE`：手动价格（美元/百万Tokens）
@@ -67,7 +68,7 @@
 - CLIProxyAPI 对接
   - `CLIPROXY_PANEL_CLIPROXY_SERVICE`：systemd 服务名（自动更新/启动停止依赖它）
   - `CLIPROXY_PANEL_CLIPROXY_BINARY`：二进制路径（自动更新替换依赖它）
-  - `CLIPROXY_PANEL_CLIPROXY_CONFIG`：config.yaml 路径（配置编辑/导出依赖它）
+  - `CLIPROXY_PANEL_CLIPROXY_CONFIG`：config.yaml 路径（配置读取/校验依赖它；主配置写回默认禁用）
   - `CLIPROXY_PANEL_AUTH_DIR`：auth 目录（凭证文件列表/健康检查依赖它）
   - `CLIPROXY_PANEL_CLIPROXY_LOG`：日志文件（请求统计/日志面板依赖它）
   - `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `CLIPROXY_PANEL_CLIPROXY_API_PORT`：管理接口地址
@@ -92,5 +93,6 @@
 ## 6) 面板面向 AI 的设计约束
 
 - 文档优先“可执行”与“可验证”（给命令/期望输出/失败处理）
-- 所有默认值偏安全（默认只监听本机；API 可选加密钥）
+- 默认值优先“可部署”与“高风险操作默认关闭”（主配置写回默认关闭；如需只本机访问请显式把监听地址改成 `127.0.0.1`）
 - 自动探测必须“只补缺省值”，不能破坏用户显式配置
+- 不要恢复前端导出入口；主配置写回默认保持关闭

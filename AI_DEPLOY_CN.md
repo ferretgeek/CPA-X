@@ -45,12 +45,13 @@ systemctl restart cliproxy-panel
 
 2) 面板 → 文件路径（可选但强烈建议）  
    - 如果你希望“日志/配置/auth 文件列表”等功能正常：把宿主机的 `config.yaml`、`main.log`、`auth_dir` 挂载到容器，并把环境变量指向容器内路径（例如 `/mnt/cliproxy/...`）
+   - 注意：这里的配置能力默认是**只读/校验**，不会写回宿主机主配置
 
 ## 1.2) 非 systemd 部署（例如 nohup/supervisor/pm2）
 
 如果目标机器没有 systemd（或你不想装 systemd 服务），面板仍可运行，但会有功能差异：
 
-- 仍可用：页面、状态、统计、模型、日志/配置读取（前提是 `.env` 中路径与上游地址正确）
+- 仍可用：页面、状态、统计、模型、日志/配置读取与校验（前提是 `.env` 中路径与上游地址正确）
 - 不可用/受限：`systemctl` 相关的服务控制；自动更新通常不可用（建议设置 `CLIPROXY_PANEL_AUTO_UPDATE_ENABLED=false`）
 
 推荐最小启动方式：
@@ -121,3 +122,5 @@ systemctl restart cliproxy-panel
 
 - 当前默认 `CLIPROXY_PANEL_BIND_HOST=0.0.0.0`
 - 如需外网访问，建议同时设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`
+- 前端已移除导出入口，不要再帮用户恢复浏览器侧导出按钮
+- 主配置写回默认关闭；如用户明确要求恢复，才引导其在 `.env` 中设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`

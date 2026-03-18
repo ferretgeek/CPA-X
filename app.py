@@ -14,6 +14,7 @@ import threading
 import re
 import platform
 import shutil
+import shlex
 import tempfile
 import tarfile
 from datetime import datetime, timedelta
@@ -25,6 +26,9 @@ import requests
 # 面板自身版本（与 GitHub Release/README 同步）
 PANEL_NAME = "CPA-X"
 PANEL_VERSION = "2.1.0"
+PRICING_BASIS_TOKENS = 1_000_000
+PRICING_BASIS_LABEL = '百万Tokens'
+PRICING_BASIS_TEXT = f'美元/{PRICING_BASIS_LABEL}'
 
 # ==================== 预编译正则表达式 ====================
 # 日志格式: [2026-01-17 05:21:09] [--------] [info ] [gin_logger.go:92] 200 |            0s |       127.0.0.1 | GET     "/v1/models"
@@ -76,6 +80,7 @@ CONFIG = {
     'cliproxy_api_base': 'http://127.0.0.1',
     'models_api_key': '',
     'management_key': '',
+    'config_write_enabled': False,
     'usage_snapshot_path': os.path.join(DATA_DIR, 'usage_snapshot.json'),
     'log_stats_path': os.path.join(DATA_DIR, 'log_stats.json'),
     'persistent_stats_path': os.path.join(DATA_DIR, 'persistent_stats.json'),
@@ -100,6 +105,7 @@ CONFIG_TYPES = {
     'idle_threshold_seconds': int,
     'auto_update_check_interval': int,
     'auto_update_enabled': bool,
+    'config_write_enabled': bool,
     'cliproxy_api_port': int,
     'pricing_input': float,
     'pricing_output': float,
@@ -267,6 +273,15 @@ def load_config_overrides():
 
 
 load_config_overrides()
+
+
+def is_config_write_enabled():
+    return _parse_bool(CONFIG.get('config_write_enabled', False))
+
+
+def config_write_blocked_response():
+    message = '当前面板已禁用配置写入，只保留自动更新和查看能力'
+    return jsonify({'success': False, 'error': message, 'message': message}), 403
 
 UPDATE_HISTORY_PATH = os.path.join(DATA_DIR, 'update_history.json')
 
@@ -731,14 +746,13 @@ def compute_usage_costs(tokens, pricing):
     output_price = _safe_float(pricing.get('output', 0.0))
     cache_price = _safe_float(pricing.get('cache', 0.0))
 
-    input_tokens = _safe_int(tokens.get('input_tokens', 0))
+    billable_input_tokens = get_billable_input_tokens(tokens)
     cached_tokens = _safe_int(tokens.get('cached_tokens', 0))
-    billable_input_tokens = max(input_tokens - cached_tokens, 0)
 
-    input_cost = billable_input_tokens / 1_000_000 * input_price
+    input_cost = billable_input_tokens / PRICING_BASIS_TOKENS * input_price
     output_tokens = _safe_int(tokens.get('output_tokens', 0))
-    output_cost = output_tokens / 1_000_000 * output_price
-    cache_cost = cached_tokens / 1_000_000 * cache_price
+    output_cost = output_tokens / PRICING_BASIS_TOKENS * output_price
+    cache_cost = cached_tokens / PRICING_BASIS_TOKENS * cache_price
     total_cost = input_cost + output_cost + cache_cost
 
     return {
@@ -746,6 +760,20 @@ def compute_usage_costs(tokens, pricing):
         'output': output_cost,
         'cache': cache_cost,
         'total': total_cost,
+    }
+
+
+def get_billable_input_tokens(tokens):
+    input_tokens = _safe_int(tokens.get('input_tokens', 0))
+    cached_tokens = _safe_int(tokens.get('cached_tokens', 0))
+    return max(input_tokens - cached_tokens, 0)
+
+
+def get_pricing_basis_info():
+    return {
+        'tokens': PRICING_BASIS_TOKENS,
+        'label': PRICING_BASIS_LABEL,
+        'text': PRICING_BASIS_TEXT,
     }
 
 
@@ -2153,10 +2181,12 @@ def auto_update_worker():
         except Exception as e:
             print(f'[{datetime.now()}] Auto-update check failed: {e}')
 
-def parse_log_file(log_file, max_lines=100):
+def parse_log_file(log_file, max_lines=100, limit=None):
     """解析日志文件（优化：Python原生读取，提取实际时间戳）"""
     if not os.path.exists(log_file):
         return []
+    if limit is None:
+        limit = max_lines if max_lines and max_lines > 0 else 50
 
     # 匹配日志时间格式: [2026-01-18 23:48:53]
     time_pattern = re.compile(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]')
@@ -2184,12 +2214,88 @@ def parse_log_file(log_file, max_lines=100):
 
                 logs.append({
                     'time': time_iso,
-                    'message': line[:500]
+                    'message': line[:500],
+                    'source': 'file'
                 })
 
-        return logs[-50:]
+        return logs[-limit:]
     except:
         return []
+
+
+def parse_journal_logs(service_name, max_lines=100):
+    """读取 systemd journal，补齐 CLIProxyAPI 后台日志"""
+    if not service_name or not is_linux() or not command_available('journalctl'):
+        return []
+
+    safe_service = shlex.quote(str(service_name))
+    ok, stdout, _ = run_cmd(
+        f'journalctl -u {safe_service} -n {int(max_lines)} --no-pager -o json',
+        timeout=20
+    )
+    if not ok or not stdout:
+        return []
+
+    logs = []
+    for raw_line in stdout.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            item = json.loads(raw_line)
+        except Exception:
+            continue
+
+        message = str(item.get('MESSAGE') or '').strip()
+        if not message:
+            continue
+
+        time_iso = datetime.utcnow().isoformat() + 'Z'
+        ts_raw = item.get('_SOURCE_REALTIME_TIMESTAMP') or item.get('__REALTIME_TIMESTAMP')
+        if ts_raw:
+            try:
+                ts_value = int(str(ts_raw)) / 1_000_000
+                time_iso = datetime.fromtimestamp(ts_value).isoformat() + 'Z'
+            except Exception:
+                pass
+
+        logs.append({
+            'time': time_iso,
+            'message': message[:500],
+            'source': 'journal'
+        })
+
+    return logs[-max_lines:]
+
+
+def merge_log_entries(*groups, limit=200):
+    """合并多个日志来源并按时间排序去重"""
+    merged = []
+    seen = set()
+
+    for group in groups:
+        for entry in group or []:
+            if not isinstance(entry, dict):
+                continue
+            message = str(entry.get('message') or '').strip()
+            if not message:
+                continue
+            time_value = str(entry.get('time') or '').strip()
+            source = str(entry.get('source') or '').strip()
+            dedupe_key = (time_value, message, source)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            merged.append({
+                'time': time_value,
+                'message': message,
+                'source': source
+            })
+
+    merged.sort(key=lambda item: item.get('time') or '')
+    if limit and limit > 0:
+        return merged[-limit:]
+    return merged
 
 def parse_request_logs(max_lines=200, use_cache=True):
     """解析 CLIProxy 请求日志（优化：预编译正则+缓存+原生读取）"""
@@ -2868,6 +2974,7 @@ def api_status():
         'output_tokens': display_output_tokens,
         'cached_tokens': display_cached_tokens,
     }
+    billable_input_tokens = get_billable_input_tokens(display_token_totals)
     usage_costs = compute_usage_costs(display_token_totals, pricing)
 
     with stats_lock:
@@ -2903,6 +3010,7 @@ def api_status():
             'failed': final_failed,
             'is_idle': idle_state.get('is_idle', True),
             'input_tokens': display_input_tokens,
+            'billable_input_tokens': billable_input_tokens,
             'output_tokens': display_output_tokens,
             'cached_tokens': display_cached_tokens,
             'total_tokens': display_total_tokens,
@@ -2916,9 +3024,11 @@ def api_status():
         },
         'config': {
             'idle_threshold': CONFIG['idle_threshold_seconds'],
-            'check_interval': CONFIG['auto_update_check_interval']
+            'check_interval': CONFIG['auto_update_check_interval'],
+            'write_enabled': is_config_write_enabled(),
         },
         'pricing': pricing,
+        'pricing_basis': get_pricing_basis_info(),
         'pricing_meta': pricing_meta,
         'usage_costs': usage_costs,
         'paths': get_paths_info(),
@@ -2933,11 +3043,11 @@ def api_logs():
 @app.route('/api/cliproxy-logs')
 def api_cliproxy_logs():
     """获取 CLIProxy 完整日志"""
-    logs = parse_log_file(CONFIG['cliproxy_log'], max_lines=150)
-    if len(logs) < 10:
-        stderr_logs = parse_log_file(CONFIG['cliproxy_stderr'], max_lines=50)
-        logs = logs + stderr_logs
-    return jsonify({'logs': logs[-50:], 'count': len(logs)})
+    file_logs = parse_log_file(CONFIG['cliproxy_log'], max_lines=400, limit=400)
+    stderr_logs = parse_log_file(CONFIG['cliproxy_stderr'], max_lines=120, limit=120)
+    journal_logs = parse_journal_logs(CONFIG.get('cliproxy_service'), max_lines=120)
+    logs = merge_log_entries(file_logs, stderr_logs, journal_logs, limit=200)
+    return jsonify({'logs': logs, 'count': len(logs)})
 
 @app.route('/api/cliproxy-logs/clear', methods=['POST'])
 def api_clear_cliproxy_logs():
@@ -3120,7 +3230,13 @@ def api_set_pricing_auto():
     _update_dotenv_values({'pricing_auto_enabled': enabled})
     # 返回当前 effective 价格，方便前端立即刷新显示
     effective, pricing_meta = get_effective_pricing()
-    return jsonify({'success': True, 'pricing_auto_enabled': enabled, 'effective_pricing': effective, 'pricing_meta': pricing_meta})
+    return jsonify({
+        'success': True,
+        'pricing_auto_enabled': enabled,
+        'effective_pricing': effective,
+        'pricing_basis': get_pricing_basis_info(),
+        'pricing_meta': pricing_meta,
+    })
 
 
 @app.route('/api/pricing', methods=['GET', 'POST'])
@@ -3144,6 +3260,7 @@ def api_pricing():
             'success': True,
             'pricing': {'input': input_price, 'output': output_price, 'cache': cache_price},
             'effective_pricing': effective,
+            'pricing_basis': get_pricing_basis_info(),
             'pricing_meta': pricing_meta,
         })
 
@@ -3157,6 +3274,7 @@ def api_pricing():
         'success': True,
         'pricing': manual,
         'effective_pricing': effective,
+        'pricing_basis': get_pricing_basis_info(),
         'pricing_meta': pricing_meta,
     })
 
@@ -3270,6 +3388,9 @@ def api_get_config():
 
 @app.route('/api/config', methods=['POST'])
 def api_upload_config():
+    if not is_config_write_enabled():
+        return config_write_blocked_response()
+
     config_path = CONFIG['cliproxy_config']
 
     if 'file' in request.files:
@@ -3317,6 +3438,9 @@ def api_upload_config():
 
 @app.route('/api/config/restore', methods=['POST'])
 def api_restore_config():
+    if not is_config_write_enabled():
+        return config_write_blocked_response()
+
     config_path = CONFIG['cliproxy_config']
     backup_path = config_path + '.bak'
 
@@ -3414,6 +3538,9 @@ def api_get_routing():
 @app.route('/api/config/routing', methods=['POST'])
 def api_set_routing():
     """设置路由策略"""
+    if not is_config_write_enabled():
+        return config_write_blocked_response()
+
     if not HAS_YAML:
         return jsonify({'success': False, 'error': 'pyyaml未安装，无法修改配置'}), 400
 

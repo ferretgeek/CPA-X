@@ -10,6 +10,8 @@ English | [中文](README_CN.md)
 
 A monitoring and management panel for **CLIProxyAPI**, featuring health checks, resource monitoring, logs, update management, request statistics, and pricing display.
 
+> Current security posture: **all frontend export entries are removed, and main-config writeback is disabled by default**. The config area is read-only / validate-only unless you explicitly set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` in `.env`.
+
 <img width="2555" height="1230" alt="CPA-X" src="https://github.com/user-attachments/assets/07a2ed19-7a93-4e43-9057-3d12f1737188" />
 <img width="2554" height="1228" alt="CPA-X-2" src="https://github.com/user-attachments/assets/0b1d502f-e66d-4a73-a55e-b50c4e6bf760" />
 
@@ -70,6 +72,7 @@ Key configurations:
 - `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `CLIPROXY_PANEL_CLIPROXY_API_PORT`
 - `CLIPROXY_PANEL_MANAGEMENT_KEY` / `CLIPROXY_PANEL_MODELS_API_KEY` (if upstream keys are enabled)
 - `CLIPROXY_PANEL_CLIPROXY_SERVICE` / `CLIPROXY_PANEL_CLIPROXY_BINARY` (required for auto-update)
+- `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED` (defaults to `false`; only enable main-config writeback if you explicitly accept that risk)
 - `CLIPROXY_PANEL_GITHUB_TOKEN` (optional: higher GitHub rate limit, fewer `latest=unknown`)
 - `CLIPROXY_PANEL_PRICING_*` (optional: cost estimation; defaults can be auto-synced from OpenRouter, disable via `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false`)
 
@@ -98,7 +101,7 @@ Shortest path (compose):
 docker compose up -d --build
 ```
 
-If you need logs/config/auth file features, follow the comments in `docker-compose.yml` to mount host files/directories and point `CLIPROXY_PANEL_*` paths to container paths.
+If you need logs/config/auth file features, follow the comments in `docker-compose.yml` to mount host files/directories and point `CLIPROXY_PANEL_*` paths to container paths. Note that config access is read-only by default and does not write back to the host config.
 
 ## FAQ
 
@@ -116,6 +119,8 @@ This is a Linux-only feature. On Windows, it will fail gracefully without affect
 - Keep management keys and model keys only in `.env`
 - Default bind host is `0.0.0.0` for LAN-friendly deployment. If you only use the panel locally, set `CLIPROXY_PANEL_BIND_HOST=127.0.0.1`
 - For an extra protection layer, set `CLIPROXY_PANEL_PANEL_ACCESS_KEY` (then `/api/*` requires `X-Panel-Key` or URL query `panel_key`)
+- All frontend export entries are removed to avoid exposing sensitive data through browser download links
+- Main-config writeback is disabled by default; only set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` if you explicitly accept that risk
 
 ## License
 MIT License (see `LICENSE`)
