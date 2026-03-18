@@ -4,6 +4,8 @@
 
 一个用于 **CLIProxyAPI** 的监控与管理面板，支持健康检查、资源监控、日志查看、更新管理、请求统计与定价显示等功能。
 
+> 当前安全策略：**前端已移除所有导出入口，主配置写回默认关闭**；配置区仅保留查看/校验能力，如确需恢复写回，必须在 `.env` 中显式设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`。
+
 > **AI 优先**：本仓库主要面向 AI Agent 部署/运维（而不是人类手动部署）。
 > - AI 部署手册：`AI_DEPLOY_CN.md`
 > - Agent 指引：`AGENTS.md`
@@ -64,6 +66,7 @@ cp .env.example .env
 - `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `CLIPROXY_PANEL_CLIPROXY_API_PORT`
 - `CLIPROXY_PANEL_MANAGEMENT_KEY` / `CLIPROXY_PANEL_MODELS_API_KEY`（如上游启用了密钥）
 - `CLIPROXY_PANEL_CLIPROXY_SERVICE` / `CLIPROXY_PANEL_CLIPROXY_BINARY`（自动更新需要）
+- `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED`（默认 `false`；只在你明确接受风险时才开启主配置写回）
 - `CLIPROXY_PANEL_GITHUB_TOKEN`（可选：提高 GitHub 限流额度，减少 `latest=unknown`）
 - `CLIPROXY_PANEL_PRICING_*`（可选：费用估算；默认支持自动同步 OpenRouter 定价，可用 `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false` 关闭）
 
@@ -92,7 +95,7 @@ http://127.0.0.1:8080
 docker compose up -d --build
 ```
 
-如需“日志/配置/auth 文件”等功能，请按 `docker-compose.yml` 的注释挂载宿主机文件/目录，并把相关 `CLIPROXY_PANEL_*` 环境变量改成容器内路径。
+如需“日志/配置/auth 文件”等功能，请按 `docker-compose.yml` 的注释挂载宿主机文件/目录，并把相关 `CLIPROXY_PANEL_*` 环境变量改成容器内路径。注意：这里的“配置”默认仅支持读取与校验，不会写回宿主机主配置。
 
 ## 常见问题
 ### 1) 页面能打开但数据为空
@@ -109,6 +112,8 @@ docker compose up -d --build
 - 管理密钥、模型密钥等敏感字段请只放在 `.env`
 - 面板当前默认监听 `0.0.0.0`，方便局域网访问；如果只用于本机，建议把 `CLIPROXY_PANEL_BIND_HOST` 改成 `127.0.0.1`
 - 如需对面板加一道访问门槛，可设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`（启用后 `/api/*` 需要 `X-Panel-Key` 或 URL 参数 `panel_key`）
+- 前端已移除所有导出入口，避免把敏感内容通过浏览器下载链接暴露出去
+- 主配置写回默认关闭；如你非常确定要恢复，才在 `.env` 中显式设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`
 
 ## 许可协议
 MIT License（见 `LICENSE`）
