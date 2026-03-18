@@ -12,8 +12,13 @@ A monitoring and management panel for **CLIProxyAPI**, featuring health checks, 
 
 > Current security posture: **all frontend export entries are removed, and main-config writeback is disabled by default**. The config area is read-only / validate-only unless you explicitly set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` in `.env`.
 
-<img width="2555" height="1230" alt="CPA-X" src="https://github.com/user-attachments/assets/07a2ed19-7a93-4e43-9057-3d12f1737188" />
-<img width="2554" height="1228" alt="CPA-X-2" src="https://github.com/user-attachments/assets/0b1d502f-e66d-4a73-a55e-b50c4e6bf760" />
+## Preview
+
+### Dark Theme
+![CPA-X Dark Preview](docs/images/preview-dark.png)
+
+### Light Theme
+![CPA-X Light Preview](docs/images/preview-light.png)
 
 ## Requirements
 - **Recommended: Linux** (panel includes `systemctl` functionality)
