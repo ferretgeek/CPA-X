@@ -11,6 +11,14 @@
 > - Agent 指引：`AGENTS.md`
 > - 更新说明：`RELEASE_NOTES_v2.1.0.md`
 
+## 预览图
+
+### 深色主题
+![CPA-X 深色预览](docs/images/preview-dark.png)
+
+### 浅色主题
+![CPA-X 浅色预览](docs/images/preview-light.png)
+
 ## 适用环境
 - **推荐：Linux**（面板含 `systemctl` 相关功能）
 - Python 3.11+
