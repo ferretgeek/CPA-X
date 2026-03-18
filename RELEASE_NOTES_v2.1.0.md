@@ -38,6 +38,11 @@
 - 面板版本统一升级为 `v2.1.0`。
 - README 中英文、安装描述、前端界面版本徽标、GitHub Release Notes 已同步到 `v2.1.0`。
 - 当前默认监听地址说明同步为 `0.0.0.0`；如只想本机访问，请显式改成 `127.0.0.1`。
+- 当前安全策略已同步到文档：
+  - 前端移除所有导出入口
+  - 主配置写回默认关闭，需要显式设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` 才会恢复
+- README 预览图已更新为仓库内置的最新界面截图（深色 / 浅色）。
+- 已清理过期历史说明文档，避免与当前文档混淆。
 
 ## English (v2.1.0)
 
@@ -74,3 +79,8 @@
 - Panel version bumped to `v2.1.0`.
 - English README, Chinese README, install metadata, UI badge, and GitHub Release notes are now synced to `v2.1.0`.
 - Default bind-host documentation is synced to `0.0.0.0`; switch to `127.0.0.1` if you want local-only access.
+- Current security posture is now reflected in docs:
+  - all frontend export entries are removed
+  - main-config writeback stays disabled by default unless `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` is explicitly set
+- README preview images are refreshed to the latest built-in UI screenshots (dark / light).
+- Outdated historical docs are removed to reduce confusion.
