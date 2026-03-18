@@ -5,82 +5,76 @@
 
 ## 中文（v2.1.0）
 
-### 本次重点
+### 一句话说明
 
-- 自动更新卡片新增“状态可视化”：
-  - 现在有没有新版本
-  - 当前是否空闲
-  - 距离满足空闲条件还差多久
-  - 距离下一次自动检查还差多久
-  - 为什么当前没有触发自动更新
+这次更新主要做了三件事：
+**让自动更新更好懂、让高风险操作默认更安全、让文档和预览图全部同步到最新状态。**
 
-### 后端改动
+### 你能直接感受到的变化
 
-- 修复空闲判断的时区问题：不再用 `datetime.utcnow()` 计算日志空闲时长，改为按服务器本地时间计算。
-- 新增 `get_idle_state()`：统一输出 `is_idle / idle_for_seconds / idle_wait_seconds / last_request_time`。
-- 新增 `get_auto_update_state()`：统一输出自动更新阶段、摘要、倒计时、上次检查时间、下次检查时间。
-- `auto_update_worker()` 现在会记录：
-  - `last_auto_update_check_time`
-  - `next_auto_update_check_time`
-  - 跳过更新的原因日志
+- 自动更新卡片现在会直接告诉你：
+  - 有没有新版本
+  - 现在是不是空闲
+  - 还要等多久才会进入空闲
+  - 下次自动检查还要等多久
+  - 为什么现在还没有自动更新
+- 前端已经移除导出入口，避免把敏感内容通过浏览器下载链接带出去。
+- 主配置写回默认关闭，面板现在更偏“查看 + 自动更新”，不再默认改线上主配置。
 
-### 前端改动
+### 修复了什么问题
 
-- 自动更新卡片新增“当前状态”和“详细说明”区域。
-- 可直接看到：
-  - 等待空闲，还差多久
-  - 下一次自动检查还差多久
-  - 最近请求时间
-  - 上次自动检查时间
+- 修复空闲判断时间不准的问题。
+  以前有时会把“已经空闲”误判成“还在忙”，现在改好了。
+- 自动更新状态不再只给一个模糊结果，前端会显示更具体的原因和倒计时。
+- 文档、README、Release 说明、预览图都已经和当前界面同步。
 
-### 部署与文档同步
+### 如果你是普通用户，需要知道什么
 
-- 面板版本统一升级为 `v2.1.0`。
-- README 中英文、安装描述、前端界面版本徽标、GitHub Release Notes 已同步到 `v2.1.0`。
-- 当前默认监听地址说明同步为 `0.0.0.0`；如只想本机访问，请显式改成 `127.0.0.1`。
-- 当前安全策略已同步到文档：
-  - 前端移除所有导出入口
-  - 主配置写回默认关闭，需要显式设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` 才会恢复
-- README 预览图已更新为仓库内置的最新界面截图（深色 / 浅色）。
-- 已清理过期历史说明文档，避免与当前文档混淆。
+- 想看状态、日志、统计、模型：照常使用。
+- 想用自动更新：照常使用，状态说明会比以前更清楚。
+- 想修改主配置：现在默认不允许。
+  只有你明确接受风险，才需要在 `.env` 里手动设置：
+  `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`
+
+### 这版还同步了什么
+
+- README 英文版、中文版都换成了最新界面预览图。
+- 旧的历史说明文档已经清理，仓库里的说明文件更清楚，不容易看混。
 
 ## English (v2.1.0)
 
-### Highlights
+### Short version
 
-- Added auto-update status visualization:
-  - whether a new release is available
-  - whether the system is currently idle
-  - how long until the idle condition is satisfied
-  - how long until the next automatic check
-  - why auto-update has not triggered yet
+This release focuses on three things:
+**clearer auto-update status, safer defaults for risky actions, and fully synced docs / screenshots.**
 
-### Backend
+### What users will notice
 
-- Fixed idle-time calculation timezone issue by using local server time instead of `datetime.utcnow()`.
-- Added `get_idle_state()` for a single source of truth around idle timing.
-- Added `get_auto_update_state()` for summarized auto-update state, countdowns, and timestamps.
-- `auto_update_worker()` now records:
-  - `last_auto_update_check_time`
-  - `next_auto_update_check_time`
-  - explicit skip reasons in logs
+- The auto-update card now clearly shows:
+  - whether a new version is available
+  - whether the system is idle right now
+  - how long until the idle condition is met
+  - how long until the next auto-check
+  - why auto-update has not started yet
+- Frontend export entries are removed to reduce the risk of exposing sensitive data through browser download links.
+- Main-config writeback is now disabled by default. The panel is safer out of the box and no longer edits the live main config unless you explicitly allow it.
 
-### Frontend
+### What was fixed
 
-- The auto-update card now shows a short status line and a detailed explanation block.
-- Users can now directly see:
-  - how long until the system becomes idle
-  - how long until the next automatic check
-  - last request time
-  - last auto-update check time
+- Fixed incorrect idle-time calculation.
+  In some cases, the panel could think the system was still busy even when it was already idle.
+- Auto-update status is now easier to understand, with clearer reasons and countdowns.
+- Docs, README, release notes, and preview screenshots are now aligned with the current UI.
 
-### Sync
+### What normal users need to know
 
-- Panel version bumped to `v2.1.0`.
-- English README, Chinese README, install metadata, UI badge, and GitHub Release notes are now synced to `v2.1.0`.
-- Default bind-host documentation is synced to `0.0.0.0`; switch to `127.0.0.1` if you want local-only access.
-- Current security posture is now reflected in docs:
-  - all frontend export entries are removed
-  - main-config writeback stays disabled by default unless `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` is explicitly set
-- README preview images are refreshed to the latest built-in UI screenshots (dark / light).
-- Outdated historical docs are removed to reduce confusion.
+- If you only need status, logs, stats, or models: nothing gets harder.
+- If you use auto-update: it should now be much easier to understand what it is waiting for.
+- If you want to edit the main config: it is blocked by default.
+  Only enable it if you fully accept the risk by setting:
+  `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`
+
+### Also updated in this release
+
+- English and Chinese README files now use the latest built-in UI screenshots.
+- Old historical docs were removed so the repo is easier to understand.
