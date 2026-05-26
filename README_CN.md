@@ -77,6 +77,7 @@ cp .env.example .env
 - `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED`（默认 `false`；只在你明确接受风险时才开启主配置写回）
 - `CLIPROXY_PANEL_GITHUB_TOKEN`（可选：提高 GitHub 限流额度，减少 `latest=unknown`）
 - `CLIPROXY_PANEL_PRICING_*`（可选：费用估算；默认支持自动同步 OpenRouter 定价，可用 `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false` 关闭）
+- `CLIPROXY_PANEL_QUOTES_PATH`（可选：名人语录库；默认使用项目根目录 `X.txt`，仓库已附带）
 
 ### 4) 启动面板
 ```bash

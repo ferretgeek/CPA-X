@@ -80,6 +80,7 @@ Key configurations:
 - `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED` (defaults to `false`; only enable main-config writeback if you explicitly accept that risk)
 - `CLIPROXY_PANEL_GITHUB_TOKEN` (optional: higher GitHub rate limit, fewer `latest=unknown`)
 - `CLIPROXY_PANEL_PRICING_*` (optional: cost estimation; defaults can be auto-synced from OpenRouter, disable via `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false`)
+- `CLIPROXY_PANEL_QUOTES_PATH` (optional: quote library; defaults to repository-root `X.txt`, included in this repo)
 
 #### 4) Start the panel
 ```bash
