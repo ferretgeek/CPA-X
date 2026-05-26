@@ -1,4 +1,4 @@
-# CPA-X 管理面板（v2.1.1）
+# CPA-X 管理面板（v2.1.2）
 
 [English](README.md) | 中文
 
@@ -9,7 +9,7 @@
 > **AI 优先**：本仓库主要面向 AI Agent 部署/运维（而不是人类手动部署）。
 > - AI 部署手册：`AI_DEPLOY_CN.md`
 > - Agent 指引：`AGENTS.md`
-> - 更新说明：`RELEASE_NOTES_v2.1.1.md`
+> - 更新说明：`RELEASE_NOTES_v2.1.2.md`
 
 ## 预览图
 
