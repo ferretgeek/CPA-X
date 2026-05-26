@@ -1,4 +1,4 @@
-# CPA-X Admin Panel (v2.1.1)
+# CPA-X Admin Panel (v2.1.2)
 
 English | [中文](README_CN.md)
 
@@ -6,7 +6,7 @@ English | [中文](README_CN.md)
 
 - AI deployment guide: `AI_DEPLOY_CN.md`
 - Agent instructions: `AGENTS.md`
-- Release notes: `RELEASE_NOTES_v2.1.1.md`
+- Release notes: `RELEASE_NOTES_v2.1.2.md`
 
 A monitoring and management panel for **CLIProxyAPI**, featuring health checks, resource monitoring, logs, update management, request statistics, and pricing display.
 
@@ -80,6 +80,7 @@ Key configurations:
 - `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED` (defaults to `false`; only enable main-config writeback if you explicitly accept that risk)
 - `CLIPROXY_PANEL_GITHUB_TOKEN` (optional: higher GitHub rate limit, fewer `latest=unknown`)
 - `CLIPROXY_PANEL_PRICING_*` (optional: cost estimation; defaults can be auto-synced from OpenRouter, disable via `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false`)
+- `CLIPROXY_PANEL_QUOTES_PATH` (optional: quote library; defaults to repository-root `X.txt`, included in this repo)
 
 #### 4) Start the panel
 ```bash

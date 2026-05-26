@@ -1,4 +1,4 @@
-# CPA-X 管理面板（v2.1.1）
+# CPA-X 管理面板（v2.1.2）
 
 [English](README.md) | 中文
 
@@ -9,7 +9,7 @@
 > **AI 优先**：本仓库主要面向 AI Agent 部署/运维（而不是人类手动部署）。
 > - AI 部署手册：`AI_DEPLOY_CN.md`
 > - Agent 指引：`AGENTS.md`
-> - 更新说明：`RELEASE_NOTES_v2.1.1.md`
+> - 更新说明：`RELEASE_NOTES_v2.1.2.md`
 
 ## 预览图
 
@@ -77,6 +77,7 @@ cp .env.example .env
 - `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED`（默认 `false`；只在你明确接受风险时才开启主配置写回）
 - `CLIPROXY_PANEL_GITHUB_TOKEN`（可选：提高 GitHub 限流额度，减少 `latest=unknown`）
 - `CLIPROXY_PANEL_PRICING_*`（可选：费用估算；默认支持自动同步 OpenRouter 定价，可用 `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false` 关闭）
+- `CLIPROXY_PANEL_QUOTES_PATH`（可选：名人语录库；默认使用项目根目录 `X.txt`，仓库已附带）
 
 ### 4) 启动面板
 ```bash

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CPA-X 管理面板后端 v2.1.1
+CPA-X 管理面板后端 v2.1.2
 功能: 为 CLIProxyAPI 提供监控统计、健康检查、资源监控、配置管理、API测试、模型管理
 优化: 缓存机制、预编译正则、非阻塞监控、减少shell调用
 """
@@ -25,7 +25,7 @@ import requests
 
 # 面板自身版本（与 GitHub Release/README 同步）
 PANEL_NAME = "CPA-X"
-PANEL_VERSION = "2.1.1"
+PANEL_VERSION = "2.1.2"
 PRICING_BASIS_TOKENS = 1_000_000
 PRICING_BASIS_LABEL = '百万Tokens'
 PRICING_BASIS_TEXT = f'美元/{PRICING_BASIS_LABEL}'
@@ -41,6 +41,10 @@ EXCLUDED_LOG_PATHS = (
     '"/v0/management/',
     '"/v1/models"',
 )
+MANAGEMENT_AUTH_MAX_FAILURES = 10
+MANAGEMENT_AUTH_FAILURE_STATUSES = {401, 403}
+BACKUP_RETENTION_COUNT = 5
+BACKUP_TS_PATTERN = re.compile(r'\.bak\.(\d{8}-\d{6})$')
 
 # 可选依赖
 try:
@@ -91,7 +95,7 @@ CONFIG = {
     'pricing_auto_enabled': True,
     'pricing_auto_source': 'openrouter',  # 目前仅实现 openrouter
     'pricing_auto_model': '',  # 为空时会从 config.yaml 里挑一个模型，最后回退到 openai/gpt-4o-mini
-    'quotes_path': os.path.join(DATA_DIR, 'quotes.txt'),
+    'quotes_path': os.path.join(BASE_DIR, 'X.txt'),
     'disk_path': '/',
     # 默认监听全部网卡，保持面板部署后可从局域网访问；如需仅本机访问，可显式设置为 127.0.0.1
     'bind_host': '0.0.0.0',
@@ -333,6 +337,13 @@ state = {
     },
     'last_health_check': None,
     'health_status': 'unknown',
+    'management_auth': {
+        'consecutive_failures': 0,
+        'locked': False,
+        'last_status': None,
+        'last_error': None,
+        'last_failure_time': None,
+    },
     'log_stats': {
         'initialized': False,
         'offset': 0,
@@ -355,6 +366,7 @@ log_lock = threading.Lock()
 log_stats_lock = threading.Lock()
 stats_lock = threading.Lock()
 persistent_stats_lock = threading.Lock()
+management_auth_lock = threading.Lock()
 
 # ==================== 持久化统计系统 ====================
 PERSISTENT_STATS_FIELDS = (
@@ -525,6 +537,113 @@ def _management_headers():
     return headers
 
 
+def _resolve_panel_path(path):
+    if not path:
+        return ''
+    path = str(path)
+    if os.path.isabs(path):
+        return path
+    return os.path.abspath(os.path.join(BASE_DIR, path))
+
+
+def _management_key_configured():
+    return bool(
+        str(CONFIG.get('management_key', '') or '').strip()
+        or str(CONFIG.get('models_api_key', '') or '').strip()
+    )
+
+
+def _management_auth_message(auth_state=None):
+    auth_state = auth_state or state.get('management_auth', {})
+    failures = int(auth_state.get('consecutive_failures') or 0)
+    if auth_state.get('locked'):
+        return 'CPA 管理密钥连续错误，已暂停管理接口请求。请手动配置正确密钥。'
+    if failures > 0:
+        return f'CPA 管理密钥可能错误，已连续失败 {failures}/{MANAGEMENT_AUTH_MAX_FAILURES} 次。'
+    if not _management_key_configured():
+        return '未配置 CPA 管理密钥，部分管理功能可能不可用。'
+    return 'CPA 管理密钥状态正常。'
+
+
+def _management_auth_snapshot():
+    with management_auth_lock:
+        auth_state = dict(state.get('management_auth', {}))
+    auth_state.update({
+        'configured': _management_key_configured(),
+        'using_models_key_fallback': bool(
+            not str(CONFIG.get('management_key', '') or '').strip()
+            and str(CONFIG.get('models_api_key', '') or '').strip()
+        ),
+        'max_failures': MANAGEMENT_AUTH_MAX_FAILURES,
+        'needs_attention': bool(auth_state.get('locked') or int(auth_state.get('consecutive_failures') or 0) > 0),
+    })
+    auth_state['message'] = _management_auth_message(auth_state)
+    return auth_state
+
+
+def _management_auth_locked():
+    with management_auth_lock:
+        return bool(state.get('management_auth', {}).get('locked'))
+
+
+def _reset_management_auth_state():
+    with management_auth_lock:
+        state['management_auth'] = {
+            'consecutive_failures': 0,
+            'locked': False,
+            'last_status': None,
+            'last_error': None,
+            'last_failure_time': None,
+        }
+    cache.invalidate('usage_snapshot')
+    cache.invalidate('local_version_mgmt')
+    cache.invalidate('local_version')
+    cache.invalidate('health_check')
+
+
+def _record_management_auth_success():
+    with management_auth_lock:
+        auth_state = state.get('management_auth', {})
+        if not auth_state.get('consecutive_failures') and not auth_state.get('locked'):
+            return
+        auth_state.update({
+            'consecutive_failures': 0,
+            'locked': False,
+            'last_status': None,
+            'last_error': None,
+            'last_failure_time': None,
+        })
+        state['management_auth'] = auth_state
+    cache.invalidate('health_check')
+
+
+def _record_management_auth_failure(status_code, error=None):
+    if status_code not in MANAGEMENT_AUTH_FAILURE_STATUSES:
+        return
+    with management_auth_lock:
+        auth_state = state.get('management_auth', {})
+        failures = int(auth_state.get('consecutive_failures') or 0) + 1
+        auth_state.update({
+            'consecutive_failures': failures,
+            'locked': failures >= MANAGEMENT_AUTH_MAX_FAILURES,
+            'last_status': status_code,
+            'last_error': str(error or f'HTTP {status_code}'),
+            'last_failure_time': datetime.now().isoformat(),
+        })
+        state['management_auth'] = auth_state
+    cache.invalidate('health_check')
+
+
+def _observe_management_response(resp):
+    if resp is None:
+        return
+    status_code = getattr(resp, 'status_code', None)
+    if status_code in MANAGEMENT_AUTH_FAILURE_STATUSES:
+        _record_management_auth_failure(status_code)
+    elif status_code is not None and 200 <= int(status_code) < 300:
+        _record_management_auth_success()
+
+
 def load_usage_snapshot_from_disk():
     path = CONFIG.get('usage_snapshot_path')
     if not path:
@@ -632,11 +751,18 @@ def fetch_usage_snapshot(use_cache=True):
         if cached is not None:
             return cached
 
+    if _management_auth_locked():
+        snapshot = load_usage_snapshot_from_disk()
+        if snapshot is not None:
+            cache.set(cache_key, snapshot)
+        return snapshot
+
     base_url = _build_management_base_url()
     url = f'{base_url}/v0/management/usage'
     headers = _management_headers()
     try:
         resp = requests.get(url, headers=headers, timeout=5)
+        _observe_management_response(resp)
         resp.raise_for_status()
         snapshot = resp.json()
         cache.set(cache_key, snapshot)
@@ -933,11 +1059,14 @@ def get_effective_pricing():
 def import_usage_snapshot(snapshot):
     if not snapshot:
         return False
+    if _management_auth_locked():
+        return False
     base_url = _build_management_base_url()
     url = f'{base_url}/v0/management/usage/import'
     headers = _management_headers()
     try:
         resp = requests.post(url, headers=headers, json=snapshot, timeout=8)
+        _observe_management_response(resp)
         resp.raise_for_status()
         return True
     except Exception as e:
@@ -1057,9 +1186,12 @@ def _normalize_quote_text(text):
 
 
 def load_quotes():
-    path = CONFIG.get('quotes_path')
+    path = _resolve_panel_path(CONFIG.get('quotes_path'))
     if not path or not os.path.exists(path):
-        return []
+        fallback_path = os.path.join(BASE_DIR, 'X.txt')
+        if not os.path.exists(fallback_path):
+            return []
+        path = fallback_path
     quotes = []
     seen = set()
     try:
@@ -1157,6 +1289,41 @@ def is_linux():
 
 def command_available(command):
     return shutil.which(command) is not None
+
+
+def cleanup_binary_backups(binary_path, keep=BACKUP_RETENTION_COUNT):
+    if not binary_path or keep < 1:
+        return []
+    backup_dir = os.path.dirname(os.path.abspath(binary_path))
+    binary_name = os.path.basename(binary_path)
+    if not backup_dir or not binary_name or not os.path.isdir(backup_dir):
+        return []
+
+    backups = []
+    prefix = f'{binary_name}.bak.'
+    try:
+        for entry in os.scandir(backup_dir):
+            if not entry.is_file():
+                continue
+            if not entry.name.startswith(prefix):
+                continue
+            if not BACKUP_TS_PATTERN.search(entry.name):
+                continue
+            backups.append((entry.stat().st_mtime, entry.path))
+    except Exception as e:
+        print(f"Warning: failed to scan binary backups: {e}")
+        return []
+
+    backups.sort(key=lambda item: item[0], reverse=True)
+    deleted = []
+    for _, path in backups[keep:]:
+        try:
+            os.remove(path)
+            deleted.append(path)
+        except Exception as e:
+            print(f"Warning: failed to remove old backup {path}: {e}")
+    return deleted
+
 
 def get_service_status(use_cache=True):
     """获取服务状态（带缓存）"""
@@ -1334,11 +1501,15 @@ def _decorate_version_tag(version):
 
 
 def _cliproxy_management_get(path, timeout=6):
+    if _management_auth_locked():
+        return None
     base_url = _build_management_base_url()
     url = f'{base_url}{path}'
     headers = _management_headers()
     try:
-        return requests.get(url, headers=headers, timeout=timeout)
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        _observe_management_response(resp)
+        return resp
     except Exception:
         return None
 
@@ -1849,6 +2020,9 @@ def perform_update():
                     backup_path = f'{cliproxy_bin}.bak.{ts}'
                     shutil.copy2(cliproxy_bin, backup_path)
                     result['details'].append(f'Backup created: {backup_path}')
+                    deleted_backups = cleanup_binary_backups(cliproxy_bin)
+                    if deleted_backups:
+                        result['details'].append(f'Old backups removed: {len(deleted_backups)}')
             except Exception as e:
                 result['message'] = f'Backup failed: {e}'
                 run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
@@ -2827,6 +3001,28 @@ def perform_health_check(use_cache=True):
         results['checks'].append(port_check)
         results['checks_map']['api_port'] = port_check
 
+    # 7. CPA 管理密钥状态检查
+    management_auth = _management_auth_snapshot()
+    if management_auth.get('locked'):
+        management_status = 'fail'
+    elif management_auth.get('consecutive_failures') or not management_auth.get('configured'):
+        management_status = 'warn'
+    else:
+        management_status = 'pass'
+    management_check = {
+        'name': '管理密钥',
+        'status': management_status,
+        'message': management_auth.get('message'),
+        'details': {
+            'configured': management_auth.get('configured'),
+            'locked': management_auth.get('locked'),
+            'consecutive_failures': management_auth.get('consecutive_failures'),
+            'max_failures': management_auth.get('max_failures'),
+        }
+    }
+    results['checks'].append(management_check)
+    results['checks_map']['management_key'] = management_check
+
     # 计算整体状态
     statuses = [c['status'] for c in results['checks']]
     if 'fail' in statuses:
@@ -3032,7 +3228,8 @@ def api_status():
         'pricing_meta': pricing_meta,
         'usage_costs': usage_costs,
         'paths': get_paths_info(),
-        'health': state['health_status']
+        'health': state['health_status'],
+        'management_auth': _management_auth_snapshot(),
     })
 
 @app.route('/api/logs')
@@ -3279,6 +3476,28 @@ def api_pricing():
     })
 
 
+@app.route('/api/config/management-key', methods=['GET', 'POST'])
+def api_management_key():
+    if request.method == 'GET':
+        return jsonify({'success': True, 'management_auth': _management_auth_snapshot()})
+
+    data = request.json or {}
+    key = str(data.get('management_key') or '').strip()
+    if not key:
+        return jsonify({'success': False, 'error': 'CPA 管理密钥不能为空'}), 400
+
+    if not _update_dotenv_values({'management_key': key}):
+        return jsonify({'success': False, 'error': '保存 .env 失败'}), 500
+
+    CONFIG['management_key'] = key
+    _reset_management_auth_state()
+    return jsonify({
+        'success': True,
+        'message': 'CPA 管理密钥已保存',
+        'management_auth': _management_auth_snapshot(),
+    })
+
+
 @app.route('/api/quote', methods=['GET', 'POST'])
 def api_quote():
     if request.method == 'POST':
@@ -3286,9 +3505,11 @@ def api_quote():
         line = (data.get('line') or '').strip()
         if not line or '出自：' not in line:
             return jsonify({'success': False, 'error': '格式错误，请使用“内容 出自：作者”'}), 400
-        path = CONFIG.get('quotes_path')
+        path = _resolve_panel_path(CONFIG.get('quotes_path'))
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            parent_dir = os.path.dirname(path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
             with open(path, 'a', encoding='utf-8') as f:
                 if not line.endswith('\n'):
                     line = line + '\n'

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CPA-X 管理面板 v2.1.1</title>
+    <title>CPA-X 管理面板 v2.1.2</title>
     <meta name="theme-color" content="#0c1222">
     <link rel="icon" href="/favicon.ico" sizes="any">
     <link rel="shortcut icon" href="/favicon.ico">
@@ -1116,6 +1116,24 @@
         .update-banner.show { display: flex; }
         .update-banner-text { font-size: 13px; display: flex; align-items: center; gap: 10px; }
         .update-banner-text svg { width: 20px; height: 20px; fill: var(--purple); }
+        .key-banner {
+            background: rgba(239, 68, 68, 0.16);
+            border: 1px solid rgba(239, 68, 68, 0.55);
+            border-radius: 10px;
+            padding: 10px 16px;
+            display: none;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+        .key-banner.show { display: flex; }
+        .key-banner-text { flex: 1; min-width: 180px; color: var(--text-primary); font-size: 13px; font-weight: 600; }
+        .key-banner-actions { display: flex; gap: 8px; align-items: center; }
+        .key-banner-actions .input { width: 240px; }
+        @media (max-width: 720px) {
+            .key-banner-actions { width: 100%; }
+            .key-banner-actions .input { flex: 1; min-width: 0; width: auto; }
+        }
 
         /* 滚动条 */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -1138,7 +1156,7 @@
                 <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
             </div>
             <span class="logo-text">CPA-X</span>
-            <span class="badge info" id="panel-version-badge" style="margin-left:6px;">v2.1.1</span>
+            <span class="badge info" id="panel-version-badge" style="margin-left:6px;">v2.1.2</span>
         </div>
         <div class="header-center">
             <div class="header-stat">
@@ -1183,6 +1201,13 @@
                     <span>发现新版本可用！当前: <span id="banner-current">-</span> → 最新: <span id="banner-latest">-</span></span>
                 </div>
                 <button class="btn btn-primary btn-sm" onclick="triggerUpdate(false)">立即更新</button>
+            </div>
+            <div id="management-key-banner" class="key-banner glass">
+                <div class="key-banner-text" id="management-key-message">CPA 管理密钥错误，管理接口已暂停。</div>
+                <div class="key-banner-actions">
+                    <input type="password" id="management-key-input" class="input" placeholder="输入新的 CPA 管理密钥">
+                    <button class="btn btn-danger btn-sm" onclick="saveManagementKey()">保存密钥</button>
+                </div>
             </div>
 
             <!-- 服务与状态 -->
@@ -1526,7 +1551,8 @@
             refreshCliLogs: false,
             loadModelsFromAPI: false,
             runHealthCheck: false,
-            refreshUpdateHistory: false
+            refreshUpdateHistory: false,
+            saveManagementKey: false
         };
         let pricingDirty = false;
         let pricingInitialized = false;
@@ -1857,6 +1883,47 @@
             });
         }
 
+        function renderManagementKeyBanner(auth) {
+            const banner = document.getElementById('management-key-banner');
+            const messageEl = document.getElementById('management-key-message');
+            if (!banner || !messageEl) return;
+            const shouldShow = !!(auth && (auth.locked || auth.consecutive_failures > 0));
+            if (!shouldShow) {
+                banner.classList.remove('show');
+                return;
+            }
+            banner.classList.add('show');
+            messageEl.textContent = auth.message || 'CPA 管理密钥错误，请重新配置。';
+        }
+
+        async function saveManagementKey() {
+            if (inflight.saveManagementKey) return;
+            const input = document.getElementById('management-key-input');
+            const key = (input?.value || '').trim();
+            if (!key) {
+                toast('请输入 CPA 管理密钥', 'error');
+                return;
+            }
+            inflight.saveManagementKey = true;
+            try {
+                const r = await api('/api/config/management-key', {
+                    method: 'POST',
+                    body: JSON.stringify({ management_key: key })
+                });
+                if (r?.success) {
+                    if (input) input.value = '';
+                    renderManagementKeyBanner(r.management_auth);
+                    toast('CPA 管理密钥已保存', 'success');
+                    refreshStatus();
+                    runHealthCheck();
+                } else {
+                    toast(r?.error || '保存密钥失败', 'error');
+                }
+            } finally {
+                inflight.saveManagementKey = false;
+            }
+        }
+
         function initUpdateSettingsInputs() {
             ['idle-input', 'check-interval-input'].forEach((id) => {
                 const input = document.getElementById(id);
@@ -1865,6 +1932,12 @@
                 input.addEventListener('change', () => { updateSettingsDirty = true; });
                 input.addEventListener('focus', () => { updateSettingsDirty = true; });
             });
+            const managementKeyInput = document.getElementById('management-key-input');
+            if (managementKeyInput) {
+                managementKeyInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') saveManagementKey();
+                });
+            }
         }
 
         // 从面板后端获取模型列表
@@ -1992,6 +2065,8 @@
             } else {
                 document.getElementById('update-banner').classList.remove('show');
             }
+
+            renderManagementKeyBanner(d.management_auth);
 
             // 请求统计
             document.getElementById('req-count').textContent = d.requests.count;
@@ -2323,10 +2398,11 @@
                     disk: '磁盘空间',
                     memory: '内存使用',
                     auth: '认证文件',
-                    api_port: 'API端口'
+                    api_port: 'API端口',
+                    management_key: '管理密钥'
                 };
 
-                const order = ['service', 'config', 'disk', 'memory', 'auth', 'api_port'];
+                const order = ['service', 'config', 'disk', 'memory', 'auth', 'api_port', 'management_key'];
                 const keys = Object.keys(checksMap);
                 const ordered = order.filter(k => keys.includes(k)).concat(keys.filter(k => !order.includes(k)));
 
