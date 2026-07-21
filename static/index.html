@@ -3,14 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CPA-X 管理面板 v2.1.2</title>
+    <title>CPA-X 管理面板 v2.2.0</title>
     <meta name="theme-color" content="#0c1222">
     <link rel="icon" href="/favicon.ico" sizes="any">
     <link rel="shortcut icon" href="/favicon.ico">
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
             --bg-gradient:
@@ -175,6 +172,7 @@
         .header-stat-dot.green { background: var(--success); color: var(--success); }
         .header-stat-dot.red { background: var(--danger); color: var(--danger); }
         .header-stat-dot.blue { background: var(--accent); color: var(--accent); }
+        .header-stat-dot.orange { background: var(--warning); color: var(--warning); }
         .header-stat-value { font-family: 'JetBrains Mono', monospace; font-weight: 600; color: var(--text-primary); }
 
         .header-actions { display: flex; align-items: center; gap: 8px; }
@@ -1141,6 +1139,256 @@
         ::-webkit-scrollbar-thumb { background: var(--glass-border); border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
+        /* v2.2：高可读、无外部字体依赖的响应式视觉系统 */
+        :root {
+            --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+            --font-mono: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            --bg-gradient:
+                radial-gradient(circle at 12% -8%, rgba(49, 151, 203, 0.23), transparent 34rem),
+                radial-gradient(circle at 92% 12%, rgba(119, 87, 185, 0.16), transparent 30rem),
+                linear-gradient(145deg, #07111f 0%, #0a1626 48%, #101a2d 100%);
+            --glass-bg: rgba(12, 27, 45, 0.86);
+            --glass-bg-hover: rgba(20, 40, 62, 0.94);
+            --glass-border: rgba(157, 192, 224, 0.18);
+            --glass-border-strong: rgba(105, 202, 246, 0.42);
+            --glass-shadow: 0 18px 48px rgba(0, 7, 18, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.035);
+            --blur: blur(16px) saturate(118%);
+            --text-primary: #eef6fc;
+            --text-secondary: #c3d1de;
+            --text-muted: #91a4b7;
+            --accent: #66c9f3;
+            --accent-strong: #a5e3fb;
+            --success: #69d19a;
+            --warning: #f0b960;
+            --danger: #f18b91;
+            --purple: #b59ae8;
+            --req-number: #8dd8fb;
+            --req-unit: #b2c1ce;
+            --quote-font-size: 17px;
+            --quote-author-size: 14px;
+            --inner-surface-bg: linear-gradient(180deg, rgba(31, 55, 78, 0.72), rgba(19, 39, 60, 0.76));
+            --inner-surface-border: rgba(157, 192, 224, 0.14);
+            --inner-surface-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 8px 22px rgba(0, 7, 18, 0.16);
+        }
+
+        [data-theme="light"] {
+            --bg-gradient:
+                radial-gradient(circle at 10% 0%, rgba(77, 181, 226, 0.18), transparent 34rem),
+                radial-gradient(circle at 96% 8%, rgba(147, 115, 210, 0.13), transparent 30rem),
+                linear-gradient(145deg, #edf4f8 0%, #f7fafc 52%, #eaf1f7 100%);
+            --glass-bg: rgba(255, 255, 255, 0.9);
+            --glass-bg-hover: #ffffff;
+            --glass-border: rgba(45, 91, 126, 0.16);
+            --glass-border-strong: rgba(20, 126, 178, 0.42);
+            --glass-shadow: 0 16px 38px rgba(52, 76, 96, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.92);
+            --text-primary: #172a3b;
+            --text-secondary: #40576b;
+            --text-muted: #5f7486;
+            --accent: #147eae;
+            --accent-strong: #0b628c;
+            --success: #187c4c;
+            --warning: #96610b;
+            --danger: #b13f49;
+            --purple: #7053a7;
+            --req-number: #146f9b;
+            --req-unit: #536a7d;
+            --inner-surface-bg: linear-gradient(180deg, #ffffff, #f5f9fc);
+            --inner-surface-border: rgba(45, 91, 126, 0.13);
+            --inner-surface-shadow: inset 0 1px 0 #ffffff, 0 7px 18px rgba(52, 76, 96, 0.08);
+        }
+
+        html, body {
+            width: 100%;
+            min-height: 100%;
+            height: auto;
+            overflow-x: hidden;
+            overflow-y: auto;
+        }
+        body {
+            min-height: 100vh;
+            display: block;
+            font-family: var(--font-sans);
+            font-size: 14px;
+            line-height: 1.5;
+            letter-spacing: 0.005em;
+        }
+        body::before { opacity: 0.28; }
+        body::after { background: radial-gradient(circle at center, transparent 48%, rgba(0, 4, 12, 0.24) 100%); }
+        [data-theme="light"] body::after { background: radial-gradient(circle at center, transparent 54%, rgba(77, 99, 117, 0.1) 100%); }
+
+        .header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            width: 100%;
+            min-height: 64px;
+            height: auto;
+            padding: 9px clamp(12px, 2vw, 28px);
+            gap: 18px;
+            border-width: 0 0 1px;
+            border-radius: 0;
+            background: rgba(8, 20, 35, 0.9);
+        }
+        [data-theme="light"] .header { background: rgba(247, 250, 252, 0.92); }
+        .logo-icon { width: 36px; height: 36px; border-radius: 11px; }
+        .logo-text { font-size: 16px; letter-spacing: 0.08em; }
+        .header-center { gap: clamp(10px, 1.5vw, 24px); }
+        .header-stat { font-size: 12px; white-space: nowrap; }
+        .header-stat-value, .info-value, .input, .log-box, .resource-chip-value, .request-current-value {
+            font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .container {
+            width: min(100%, 1920px);
+            min-height: calc(100vh - 64px);
+            margin: 0 auto;
+            padding: clamp(12px, 1.4vw, 24px);
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(330px, 410px);
+            align-items: start;
+            gap: clamp(12px, 1.2vw, 20px);
+            overflow: visible;
+        }
+        .main-panel { min-width: 0; overflow: visible; gap: clamp(12px, 1.2vw, 18px); }
+        .log-panel {
+            position: sticky;
+            top: 80px;
+            height: calc(100vh - 96px);
+            min-width: 0;
+        }
+        .log-card { height: 100%; min-height: 420px; }
+        .log-header { gap: 12px; flex-wrap: wrap; }
+        .log-box { min-height: 300px; padding: 12px; font-size: 12px; line-height: 1.65; }
+        .log-entry { padding: 9px 11px; word-break: break-word; overflow-wrap: anywhere; }
+
+        .cards-grid { gap: clamp(12px, 1.2vw, 18px); }
+        .cards-grid.fixed-grid { grid-auto-rows: auto; }
+        .cards-grid.fixed-grid > .card {
+            height: auto;
+            min-height: 0;
+            overflow: visible;
+        }
+        .card {
+            padding: clamp(15px, 1.3vw, 20px);
+            border-radius: 16px;
+        }
+        .card-header { margin-bottom: 14px; }
+        .card-title { font-size: 16px; letter-spacing: 0.015em; }
+        .card-subtitle { font-size: 12px; line-height: 1.45; }
+        .card-icon { width: 42px; height: 42px; }
+        .service-card { min-height: 0; }
+
+        .request-body { gap: 12px; }
+        .request-body .req-summary-grid { gap: 9px; }
+        .request-body .req-summary-item { padding: 12px 8px; border-radius: 12px; }
+        .request-body .req-summary-number { font-size: clamp(24px, 2.2vw, 34px); }
+        .request-body .req-summary-label, .request-current-label { font-size: 11px; color: var(--text-muted); }
+        .request-panel { padding: 12px 13px; }
+        .request-panel-title { font-size: 13px; }
+        .request-panel-subtitle, .request-note-row { font-size: 12px; }
+
+        .quote-box {
+            min-height: 190px;
+            overflow: visible !important;
+            padding: 16px !important;
+            justify-content: flex-start;
+        }
+        #quote-text {
+            color: var(--text-primary);
+            font-size: var(--quote-font-size);
+            line-height: 1.75;
+            flex: 0 0 auto;
+            min-height: 0;
+            overflow: visible;
+            overflow-wrap: anywhere;
+            text-wrap: pretty;
+        }
+        #quote-author {
+            color: var(--text-secondary);
+            font-size: var(--quote-author-size);
+            line-height: 1.55;
+        }
+        .quote-controls, .quote-size-controls { flex-wrap: wrap; }
+
+        .btn { min-height: 36px; font-size: 13px; border-radius: 9px; }
+        .btn-sm { min-height: 32px; padding: 6px 11px; font-size: 12px; }
+        .btn-ghost { background: rgba(116, 158, 190, 0.1); }
+        [data-theme="light"] .btn-ghost { background: rgba(42, 102, 140, 0.07); }
+        .input { min-height: 36px; font-size: 13px; background: rgba(7, 19, 32, 0.62); }
+        [data-theme="light"] .input { background: #ffffff; }
+        .switch { flex: 0 0 auto; padding: 0; }
+        :is(button, input, select, textarea, .switch):focus-visible {
+            outline: 3px solid var(--accent);
+            outline: 3px solid color-mix(in srgb, var(--accent) 42%, transparent);
+            outline-offset: 2px;
+        }
+        .info-row { min-height: 42px; gap: 14px; font-size: 13px; }
+        .info-label { color: var(--text-secondary); }
+        .badge { font-size: 12px; }
+        .progress-bar { background: rgba(2, 10, 20, 0.34); }
+        .resource-meta-item { font-size: 11px; }
+        .update-history-info, .auto-status-detail { font-size: 12px; line-height: 1.55; }
+
+        @media (min-width: 1501px) {
+            .request-main-layout { grid-template-columns: minmax(0, 1.35fr) minmax(430px, 0.9fr); }
+        }
+
+        @media (max-width: 1500px) {
+            .cards-grid:not(.fixed-top) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .request-main-layout { grid-template-columns: 1fr; }
+        }
+
+        @media (max-width: 1180px) {
+            .container { grid-template-columns: 1fr; }
+            .log-panel { position: static; height: min(520px, 65vh); }
+            .log-card { min-height: 380px; }
+        }
+
+        @media (max-width: 820px) {
+            .header { position: relative; flex-wrap: wrap; }
+            .header-center {
+                order: 3;
+                width: 100%;
+                padding-top: 8px;
+                border-top: 1px solid var(--glass-border);
+                overflow-x: auto;
+                justify-content: space-between;
+            }
+            .cards-grid, .cards-grid:not(.fixed-top) { grid-template-columns: 1fr; }
+            .request-body .req-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .request-body .req-summary-item:last-child { grid-column: 1 / -1; }
+            .pricing-manual-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .pricing-manual-row .btn { grid-column: 1 / -1; }
+            .request-current-grid { grid-template-columns: 1fr; }
+            .request-body .req-tokens-grid { grid-template-columns: 1fr; }
+            .request-body .req-tokens-grid .req-cost-value { text-align: left !important; margin-bottom: 8px; }
+            .log-panel { height: 500px; }
+        }
+
+        @media (max-width: 560px) {
+            .container { padding: 10px; }
+            .header-actions .btn { font-size: 0; width: 38px; padding: 0; }
+            .header-actions .btn svg { margin: 0; }
+            .card { padding: 14px; }
+            .request-body .req-summary-number { font-size: 25px; }
+            .quote-controls { align-items: flex-end; }
+            .quote-size-controls { justify-content: stretch; }
+            .quote-size-controls .btn { flex: 1; }
+            .key-banner-actions { flex-wrap: wrap; }
+            .key-banner-actions .btn { width: 100%; }
+            .log-header > div:last-child { width: 100%; justify-content: space-between !important; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                scroll-behavior: auto !important;
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+
     </style>
 </head>
 <body data-theme="dark">
@@ -1156,7 +1404,7 @@
                 <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
             </div>
             <span class="logo-text">CPA-X</span>
-            <span class="badge info" id="panel-version-badge" style="margin-left:6px;">v2.1.2</span>
+            <span class="badge info" id="panel-version-badge" style="margin-left:6px;">v2.2.0</span>
         </div>
         <div class="header-center">
             <div class="header-stat">
@@ -1181,11 +1429,11 @@
             </div>
         </div>
         <div class="header-actions">
-            <button class="btn btn-ghost btn-sm" onclick="refreshAll()">
+            <button type="button" class="btn btn-ghost btn-sm" onclick="refreshAll()" aria-label="刷新全部面板数据">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
                 刷新
             </button>
-            <button class="theme-btn" onclick="toggleTheme()" title="切换主题">
+            <button type="button" class="theme-btn" onclick="toggleTheme()" title="切换主题" aria-label="切换明暗主题">
                 <svg id="theme-icon" viewBox="0 0 24 24"><path d="M12 7a5 5 0 100 10 5 5 0 000-10zM12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
             </button>
         </div>
@@ -1195,18 +1443,18 @@
         <!-- 左侧功能区 -->
         <div class="main-panel">
             <!-- 更新提醒 -->
-            <div id="update-banner" class="update-banner glass">
+            <div id="update-banner" class="update-banner glass" role="status" aria-live="polite">
                 <div class="update-banner-text">
                     <svg viewBox="0 0 24 24"><path d="M21 10.12h-6.78l2.74-2.82c-2.73-2.7-7.15-2.8-9.88-.1-2.73 2.71-2.73 7.08 0 9.79s7.15 2.71 9.88 0C18.32 15.65 19 14.08 19 12.1h2c0 1.98-.88 4.55-2.64 6.29-3.51 3.48-9.21 3.48-12.72 0-3.5-3.47-3.53-9.11-.02-12.58s9.14-3.47 12.65 0L21 3v7.12z"/></svg>
                     <span>发现新版本可用！当前: <span id="banner-current">-</span> → 最新: <span id="banner-latest">-</span></span>
                 </div>
-                <button class="btn btn-primary btn-sm" onclick="triggerUpdate(false)">立即更新</button>
+                <button type="button" class="btn btn-primary btn-sm" onclick="triggerUpdate(false)">立即更新</button>
             </div>
-            <div id="management-key-banner" class="key-banner glass">
+            <div id="management-key-banner" class="key-banner glass" role="alert">
                 <div class="key-banner-text" id="management-key-message">CPA 管理密钥错误，管理接口已暂停。</div>
                 <div class="key-banner-actions">
-                    <input type="password" id="management-key-input" class="input" placeholder="输入新的 CPA 管理密钥">
-                    <button class="btn btn-danger btn-sm" onclick="saveManagementKey()">保存密钥</button>
+                    <input type="password" id="management-key-input" class="input" placeholder="输入新的 CPA 管理密钥" aria-label="CPA 管理密钥" autocomplete="off">
+                    <button type="button" class="btn btn-danger btn-sm" onclick="saveManagementKey()">保存密钥</button>
                 </div>
             </div>
 
@@ -1220,7 +1468,7 @@
                             <div class="card-title">请求统计</div>
                             <div class="card-subtitle">API 使用监控</div>
                         </div>
-                        <button class="btn btn-ghost btn-sm" onclick="clearStats()" title="清空统计">清空</button>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="clearStats()" title="清空统计">清空</button>
                     </div>
                     <div class="card-body request-body">
                         <div class="req-summary-grid">
@@ -1273,7 +1521,7 @@
                                     </div>
                                     <div class="request-pricing-toggle">
                                         <span id="pricing-auto-label" style="font-size:11px;color:var(--text-muted);">-</span>
-                                        <div id="pricing-auto-switch" class="switch" onclick="togglePricingAuto()"></div>
+                                        <button type="button" id="pricing-auto-switch" class="switch" onclick="togglePricingAuto()" aria-label="切换价格自动同步" aria-pressed="false"></button>
                                     </div>
                                 </div>
                                 <div class="request-current-grid">
@@ -1295,10 +1543,10 @@
                                     <span id="pricing-basis-info">计价口径：美元/百万Tokens（固定，不随上方 Token 单位切换）</span>
                                 </div>
                                 <div class="pricing-manual-row">
-                                    <input type="number" id="pricing-input" class="input" placeholder="输入" step="0.001" min="0">
-                                    <input type="number" id="pricing-output" class="input" placeholder="输出" step="0.001" min="0">
-                                    <input type="number" id="pricing-cache" class="input" placeholder="缓存" step="0.001" min="0">
-                                    <button class="btn btn-ghost btn-sm" onclick="savePricing()" style="flex:1;">保存手动价格</button>
+                                    <input type="number" id="pricing-input" class="input" placeholder="输入" step="0.001" min="0" aria-label="每百万 Token 输入价格">
+                                    <input type="number" id="pricing-output" class="input" placeholder="输出" step="0.001" min="0" aria-label="每百万 Token 输出价格">
+                                    <input type="number" id="pricing-cache" class="input" placeholder="缓存" step="0.001" min="0" aria-label="每百万 Token 缓存价格">
+                                    <button type="button" class="btn btn-ghost btn-sm" onclick="savePricing()" style="flex:1;">保存手动价格</button>
                                 </div>
                             </div>
                         </div>
@@ -1315,22 +1563,22 @@
                         <div class="card-icon blue"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
                         <div>
                             <div class="card-title">名人语录</div>
-                            <div class="card-subtitle">默认语录库（已接入 X.TXT）</div>
+                            <div class="card-subtitle">默认语录库（强制加载 X.txt）</div>
                         </div>
                     </div>
                     <div class="quote-box" style="margin-top:10px;border-radius:8px;padding:12px;">
-                        <div id="quote-text">-</div>
+                        <div id="quote-text" aria-live="polite">-</div>
                         <div id="quote-author" style="margin-top:6px;text-align:right;">-</div>
                         <div class="quote-controls">
                             <span style="font-size:10px;color:var(--text-muted);">刷新间隔</span>
-                            <input type="number" id="quote-interval-input" class="input" style="width:60px;" value="5" min="1">
+                            <input type="number" id="quote-interval-input" class="input" style="width:68px;" value="5" min="1" max="1440" aria-label="语录刷新间隔（分钟）">
                             <span style="font-size:10px;color:var(--text-muted);">分钟</span>
-                            <button class="btn btn-ghost btn-sm" onclick="refreshQuote()" style="margin-left:auto;">换一条</button>
-                            <button class="btn btn-ghost btn-sm" onclick="addQuote()" style="opacity:0.6;font-size:10px;">添加</button>
+                            <button type="button" class="btn btn-ghost btn-sm" onclick="refreshQuote()" style="margin-left:auto;">换一条</button>
+                            <button type="button" class="btn btn-ghost btn-sm" onclick="addQuote()">添加</button>
                         </div>
                         <div class="quote-size-controls" style="margin-top:6px;">
-                            <button class="btn btn-ghost btn-sm" id="quote-size-btn" onclick="adjustQuoteFont('text')">语录：15 px</button>
-                            <button class="btn btn-ghost btn-sm" id="quote-author-size-btn" onclick="adjustQuoteFont('author')">作者：13 px</button>
+                            <button type="button" class="btn btn-ghost btn-sm" id="quote-size-btn" onclick="adjustQuoteFont('text')">语录：17 px</button>
+                            <button type="button" class="btn btn-ghost btn-sm" id="quote-author-size-btn" onclick="adjustQuoteFont('author')">作者：14 px</button>
                         </div>
                     </div>
                 </div>
@@ -1359,9 +1607,9 @@
                         <div id="recent-updates"></div>
                     </div>
                     <div class="btn-group">
-                        <button class="btn btn-ghost btn-sm" onclick="checkUpdate()">检查</button>
-                        <button class="btn btn-primary btn-sm" onclick="triggerUpdate(false)">更新</button>
-                        <button class="btn btn-warning btn-sm" onclick="triggerUpdate(true)">强制</button>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="checkUpdate()">检查</button>
+                        <button type="button" class="btn btn-primary btn-sm" onclick="triggerUpdate(false)">更新</button>
+                        <button type="button" class="btn btn-warning btn-sm" onclick="triggerUpdate(true)">强制</button>
                     </div>
                 </div>
 
@@ -1378,32 +1626,32 @@
                         <span class="info-label">自动更新</span>
                         <div style="display:flex;align-items:center;gap:8px;">
                             <span id="auto-label" style="font-size:11px;color:var(--text-muted);">关闭</span>
-                            <div id="auto-switch" class="switch" onclick="toggleAutoUpdate()"></div>
+                            <button type="button" id="auto-switch" class="switch" onclick="toggleAutoUpdate()" aria-label="切换自动更新" aria-pressed="false"></button>
                         </div>
                     </div>
                     <div class="info-row">
                         <span class="info-label" title="多久检查一次新版本">检查间隔（检查更新的间隔）</span>
                         <div style="display:flex;align-items:center;gap:6px;">
-                            <input type="number" id="check-interval-input" class="input" style="width:70px;" value="5" min="1">
+                            <input type="number" id="check-interval-input" class="input" style="width:78px;" value="5" min="1" max="1440" aria-label="更新检查间隔（分钟）">
                             <span style="font-size:11px;color:var(--text-muted);">分钟</span>
                         </div>
                     </div>
                     <div class="info-row">
                         <span class="info-label" title="无请求日志持续多久后才执行更新">空闲阈值（多久没有请求日志则检查更新）</span>
                         <div style="display:flex;align-items:center;gap:6px;">
-                            <input type="number" id="idle-input" class="input" style="width:70px;" value="30" min="1">
+                            <input type="number" id="idle-input" class="input" style="width:78px;" value="30" min="1" max="10080" aria-label="更新前空闲阈值（分钟）">
                             <span style="font-size:11px;color:var(--text-muted);">分钟</span>
                         </div>
                     </div>
                     <div class="info-row">
                         <span class="info-label">当前状态</span>
-                        <span id="auto-status-line" class="badge info">等待数据</span>
+                        <span id="auto-status-line" class="badge info" role="status">等待数据</span>
                     </div>
                     <div id="auto-status-detail" class="auto-status-detail">
                         正在读取自动更新状态...
                     </div>
                     <div class="btn-group">
-                        <button class="btn btn-ghost btn-sm" onclick="saveUpdateSettings()" style="flex:1;">保存设置</button>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="saveUpdateSettings()" style="flex:1;">保存设置</button>
                     </div>
                 </div>
 
@@ -1531,8 +1779,8 @@
                             <input type="checkbox" id="hide-localhost" checked onchange="saveLogFilter();refreshCliLogs();" style="cursor:pointer;">
                             <span>屏蔽本地</span>
                         </label>
-                        <button class="btn btn-ghost btn-sm" onclick="clearLogDisplay()" title="清空显示">清空</button>
-                        <button class="btn btn-ghost btn-sm" onclick="refreshCliLogs()">刷新</button>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="clearLogDisplay()" title="仅清空当前浏览器显示">清空</button>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="refreshCliLogs()">刷新</button>
                     </div>
                 </div>
                 <div id="cli-logs" class="log-box">
@@ -1558,6 +1806,7 @@
         let pricingInitialized = false;
         let updateSettingsDirty = false;
         let configWriteEnabled = false;
+        let logDisplayClearedAt = 0;
 
         // 日志过滤设置
         function initLogFilter() {
@@ -1601,9 +1850,16 @@
                 : '<path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>';
         }
 
+        function setSwitchState(element, enabled) {
+            if (!element) return;
+            element.classList.toggle('on', !!enabled);
+            element.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+        }
+
 	        // API 调用
 	        async function api(endpoint, opts = {}) {
-	            const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+	            const headers = { Accept: 'application/json', ...(opts.headers || {}) };
+	            if (opts.body != null && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
 	            const panelKey = (localStorage.getItem('panel_key') || '').trim();
 	            if (panelKey) headers['X-Panel-Key'] = panelKey;
 
@@ -1743,36 +1999,9 @@
         }
 
         let quoteTimer = null;
-        let quoteTypingTimer = null;
-        let authorTypingTimer = null;
-        const quoteFontDefaults = { text: 15, author: 13 };
-        const quoteFontLimits = { min: 6, max: 40 };
+        const quoteFontDefaults = { text: 17, author: 14 };
+        const quoteFontLimits = { min: 12, max: 32 };
         const quoteFontState = { text: quoteFontDefaults.text, author: quoteFontDefaults.author };
-
-        function startTypewriter(el, text, opts = {}) {
-            if (!el) return null;
-            const speed = opts.speed || 35;
-            const scroll = opts.scroll || false;
-            const hscroll = opts.hscroll || false;
-            el.textContent = '';
-            el.scrollTop = 0;
-            el.scrollLeft = 0;
-            let idx = 0;
-            const timer = setInterval(() => {
-                idx += 1;
-                el.textContent = text.slice(0, idx);
-                if (scroll) {
-                    el.scrollTop = el.scrollHeight;
-                }
-                if (hscroll) {
-                    el.scrollLeft = el.scrollWidth;
-                }
-                if (idx >= text.length) {
-                    clearInterval(timer);
-                }
-            }, speed);
-            return timer;
-        }
 
         function updateQuoteFontButtons() {
             const textBtn = document.getElementById('quote-size-btn');
@@ -1783,10 +2012,10 @@
 
         function setQuoteFontSizes(textSize, authorSize) {
             if (!Number.isFinite(textSize) || !Number.isFinite(authorSize)) return;
-            quoteFontState.text = textSize;
-            quoteFontState.author = authorSize;
-            document.documentElement.style.setProperty('--quote-font-size', `${textSize}px`);
-            document.documentElement.style.setProperty('--quote-author-size', `${authorSize}px`);
+            quoteFontState.text = Math.max(quoteFontLimits.min, Math.min(quoteFontLimits.max, textSize));
+            quoteFontState.author = Math.max(quoteFontLimits.min, Math.min(quoteFontLimits.max, authorSize));
+            document.documentElement.style.setProperty('--quote-font-size', `${quoteFontState.text}px`);
+            document.documentElement.style.setProperty('--quote-author-size', `${quoteFontState.author}px`);
             updateQuoteFontButtons();
         }
 
@@ -1827,10 +2056,8 @@
             const author = d.author || '-';
             const textEl = document.getElementById('quote-text');
             const authorEl = document.getElementById('quote-author');
-            if (quoteTypingTimer) clearInterval(quoteTypingTimer);
-            if (authorTypingTimer) clearInterval(authorTypingTimer);
-            quoteTypingTimer = startTypewriter(textEl, text, { speed: 25, scroll: true });
-            authorTypingTimer = startTypewriter(authorEl, author, { speed: 35 });
+            textEl.textContent = text;
+            authorEl.textContent = author;
         }
 
         function refreshQuote() {
@@ -1855,11 +2082,12 @@
         function updateQuoteInterval() {
             const input = document.getElementById('quote-interval-input');
             if (!input) return;
-            const minutes = Math.max(1, parseInt(input.value || '5', 10));
+            const parsed = parseInt(input.value || '5', 10);
+            const minutes = Number.isFinite(parsed) ? Math.max(1, Math.min(1440, parsed)) : 5;
             input.value = minutes;
             localStorage.setItem('quote_refresh_minutes', minutes);
             if (quoteTimer) clearInterval(quoteTimer);
-            quoteTimer = setInterval(loadQuote, minutes * 60 * 1000);
+            quoteTimer = setInterval(() => { if (!document.hidden) loadQuote(); }, minutes * 60 * 1000);
         }
 
         function initQuote() {
@@ -1988,7 +2216,7 @@
                                     <div class="model-name">${escapeHtml(m.id || m.name || 'unknown')}</div>
                                     <div class="model-provider">Owner: ${escapeHtml(m.owned_by || m.provider || 'unknown')}</div>
                                 </div>
-                                <span class="badge info">${m.object || 'model'}</span>
+                                <span class="badge info">${escapeHtml(m.object || 'model')}</span>
                             </div>
                         `).join('');
                         return `
@@ -2017,8 +2245,9 @@
         async function refreshStatus() {
             if (inflight.refreshStatus) return;
             inflight.refreshStatus = true;
+            try {
             const d = await api('/api/status');
-            if (!d) { inflight.refreshStatus = false; return; }
+            if (!d) return;
             configWriteEnabled = d.config?.write_enabled !== false;
 
             const running = d.service.running;
@@ -2076,17 +2305,22 @@
             if (reqFailed) reqFailed.textContent = d.requests.failed || 0;
             const idleEl = document.getElementById('idle-status');
             if (idleEl) {
+                const logUnavailable = d.requests.idle_reason === 'log_unavailable';
+                const invalidTimestamp = d.requests.idle_reason === 'invalid_timestamp';
                 idleEl.className = 'badge ' + (d.requests.is_idle ? 'info' : 'warning');
-                idleEl.textContent = d.requests.is_idle ? '空闲中' : '处理中';
+                idleEl.textContent = logUnavailable ? '日志不可用' : (invalidTimestamp ? '时间无效' : (d.requests.is_idle ? '空闲中' : '处理中'));
+                idleEl.title = (logUnavailable || invalidTimestamp) ? '无法可靠判断空闲状态，自动更新会保持等待' : '';
             }
 
             const inputTokens = d.requests.input_tokens || 0;
             const billableInputTokens = d.requests.billable_input_tokens || 0;
             const outputTokens = d.requests.output_tokens || 0;
+            const reasoningTokens = d.requests.reasoning_tokens || 0;
+            const billedOutputTokens = Number(outputTokens) + Number(reasoningTokens);
             const cacheTokens = d.requests.cached_tokens || 0;
-            const totalTokens = d.requests.total_tokens || (inputTokens + outputTokens);
+            const totalTokens = d.requests.total_tokens || (Number(inputTokens) + billedOutputTokens);
             document.getElementById('req-input-tokens').innerHTML = `输入（含缓存）：${formatTokens(inputTokens)}`;
-            document.getElementById('req-output-tokens').innerHTML = `输出：${formatTokens(outputTokens)}`;
+            document.getElementById('req-output-tokens').innerHTML = `${reasoningTokens ? '输出（含推理）' : '输出'}：${formatTokens(billedOutputTokens)}`;
             document.getElementById('req-cache-tokens').innerHTML = `缓存：${formatTokens(cacheTokens)}`;
             document.getElementById('req-total-tokens').textContent = formatTokensShort(totalTokens);
             const unitEl = document.getElementById('req-total-tokens-unit');
@@ -2140,13 +2374,8 @@
 	            const pSw = document.getElementById('pricing-auto-switch');
 	            const pLabel = document.getElementById('pricing-auto-label');
 	            if (pSw && pLabel) {
-	                if (pricingAutoEnabled) {
-	                    pSw.classList.add('on');
-	                    pLabel.textContent = '已开启';
-	                } else {
-	                    pSw.classList.remove('on');
-	                    pLabel.textContent = '已关闭';
-	                }
+	                setSwitchState(pSw, pricingAutoEnabled);
+	                pLabel.textContent = pricingAutoEnabled ? '已开启' : '已关闭';
 	            }
 	            const pInfo = document.getElementById('pricing-source-info');
 	            if (pInfo) {
@@ -2167,8 +2396,8 @@
             // 自动更新开关
             const sw = document.getElementById('auto-switch');
             const label = document.getElementById('auto-label');
-            if (d.update.auto_enabled) { sw.classList.add('on'); label.textContent = '已开启'; }
-            else { sw.classList.remove('on'); label.textContent = '已关闭'; }
+            setSwitchState(sw, d.update.auto_enabled);
+            label.textContent = d.update.auto_enabled ? '已开启' : '已关闭';
             // 自动更新配置（避免每 5 秒刷新把用户正在输入的值“打回原值”）
             const idleInputEl = document.getElementById('idle-input');
             const checkIntervalEl = document.getElementById('check-interval-input');
@@ -2221,11 +2450,16 @@
                 } else {
                     detailParts.push('当前没有可安装的新版本');
                 }
-                if (autoIdle.last_request_time) {
+                if (autoIdle.reason === 'log_unavailable') {
+                    detailParts.push('请求日志路径不可用；为避免中断流量，自动更新已保持等待');
+                } else if (autoIdle.reason === 'invalid_timestamp') {
+                    detailParts.push('请求日志时间戳无法解析；为避免中断流量，自动更新已保持等待');
+                } else if (autoIdle.last_request_time) {
+                    const lastRequestText = escapeHtml(formatDateTimeCn(autoIdle.last_request_time));
                     if (autoIdle.is_idle) {
-                        detailParts.push(`最近请求在 ${escapeHtml(autoIdle.last_request_time)}，已空闲 ${renderAutoTime(formatDurationCn(autoIdle.idle_for_seconds || 0))}`);
+                        detailParts.push(`最近请求在 ${lastRequestText}，已空闲 ${renderAutoTime(formatDurationCn(autoIdle.idle_for_seconds || 0))}`);
                     } else {
-                        detailParts.push(`最近请求在 ${escapeHtml(autoIdle.last_request_time)}，还需空闲 ${renderAutoTime(formatDurationCn(autoIdle.idle_wait_seconds || 0))}`);
+                        detailParts.push(`最近请求在 ${lastRequestText}，还需空闲 ${renderAutoTime(formatDurationCn(autoIdle.idle_wait_seconds || 0))}`);
                     }
                 } else {
                     detailParts.push('暂无请求记录，当前视为空闲');
@@ -2244,14 +2478,19 @@
                 healthOverallEl.textContent = d.health === 'healthy' ? '健康' : d.health === 'degraded' ? '警告' : d.health === 'unhealthy' ? '异常' : d.health;
             }
 
-            inflight.refreshStatus = false;
+            } catch (error) {
+                console.error('状态渲染失败:', error);
+            } finally {
+                inflight.refreshStatus = false;
+            }
         }
 
         async function refreshResources() {
             if (inflight.refreshResources) return;
             inflight.refreshResources = true;
+            try {
             const d = await api('/api/resources');
-            if (!d || d.error) { inflight.refreshResources = false; return; }
+            if (!d || d.error) return;
 
             // CPU
             document.getElementById('cpu-percent').textContent = d.cpu.percent.toFixed(1) + '%';
@@ -2330,7 +2569,11 @@
             document.getElementById('disk-bar').style.width = d.disk.percent + '%';
             document.getElementById('disk-bar').className = 'progress-fill ' + (d.disk.percent > 80 ? 'red' : d.disk.percent > 60 ? 'orange' : 'orange');
 
-            inflight.refreshResources = false;
+            } catch (error) {
+                console.error('资源渲染失败:', error);
+            } finally {
+                inflight.refreshResources = false;
+            }
         }
 
         async function clearStats() {
@@ -2399,10 +2642,11 @@
                     memory: '内存使用',
                     auth: '认证文件',
                     api_port: 'API端口',
-                    management_key: '管理密钥'
+                    management_key: '管理密钥',
+                    usage_statistics: '用量统计'
                 };
 
-                const order = ['service', 'config', 'disk', 'memory', 'auth', 'api_port', 'management_key'];
+                const order = ['service', 'config', 'usage_statistics', 'disk', 'memory', 'auth', 'api_port', 'management_key'];
                 const keys = Object.keys(checksMap);
                 const ordered = order.filter(k => keys.includes(k)).concat(keys.filter(k => !order.includes(k)));
 
@@ -2451,15 +2695,9 @@
         }
 
         function clearLogDisplay() {
-            if (!confirm('确定要清空日志文件吗？')) return;
-            api('/api/cliproxy-logs/clear', { method: 'POST' }).then((r) => {
-                if (r && r.success) {
-                    document.getElementById('cli-logs').innerHTML = '<div class="log-entry"><span class="log-msg">日志已清空</span></div>';
-                    toast(r.message || '日志已清空', 'success');
-                } else {
-                    toast('清空失败: ' + (r?.message || '未知错误'), 'error');
-                }
-            });
+            logDisplayClearedAt = Date.now();
+            document.getElementById('cli-logs').innerHTML = '<div class="log-entry"><span class="log-msg">当前显示已清空；服务日志文件未被修改</span></div>';
+            toast('已清空当前显示，原始日志仍安全保留', 'success');
         }
 
         // 解析服务器时间并转换为本地时间
@@ -2483,10 +2721,15 @@
             }
 
             // 过滤掉 127.0.0.1 的日志（如果开关开启）
-            const filteredLogs = d.logs.filter(l => !shouldHideLog(l.message));
+            const filteredLogs = d.logs.filter((l) => {
+                const timestamp = parseServerTime(l.time).getTime();
+                return !shouldHideLog(l.message) && (!logDisplayClearedAt || timestamp > logDisplayClearedAt);
+            });
             
             if (!filteredLogs.length) {
-                el.innerHTML = '<div class="log-entry"><span class="log-msg">暂无日志（已过滤本地请求）</span></div>';
+                el.innerHTML = logDisplayClearedAt
+                    ? '<div class="log-entry"><span class="log-msg">当前显示已清空，正在等待新日志...</span></div>'
+                    : '<div class="log-entry"><span class="log-msg">暂无日志（已过滤本地请求）</span></div>';
                 inflight.refreshCliLogs = false;
                 return;
             }
@@ -2618,13 +2861,21 @@
 
         async function checkUpdate() {
             const r = await api('/api/check-update');
-            toast(r?.has_update ? `发现新版本: ${r.latest}` : '已是最新版本', r?.has_update ? 'warning' : 'success');
+            if (!r || !r.latest || r.latest === 'unknown') {
+                toast('暂时无法获取上游版本，请检查 GitHub 网络连接', 'error');
+                return;
+            }
+            toast(r.has_update ? `发现新版本: ${r.latest}` : '已是最新版本', r.has_update ? 'warning' : 'success');
             refreshStatus();
         }
 
         async function triggerUpdate(force) {
             const r = await api('/api/update', { method: 'POST', body: JSON.stringify({ force }) });
-            toast(r?.message || '更新请求已发送', r?.success ? 'success' : 'warning');
+            if (!r) {
+                toast('更新请求失败，请检查面板连接', 'error');
+                return;
+            }
+            toast(r.message || (r.success ? '更新请求已发送' : '更新未启动'), r.success ? 'success' : 'warning');
             setTimeout(refreshStatus, 3000);
         }
 
@@ -2633,8 +2884,9 @@
 	            const on = sw.classList.contains('on');
 	            const r = await api('/api/config/auto-update', { method: 'POST', body: JSON.stringify({ enabled: !on }) });
 	            if (r?.success) {
-	                sw.classList.toggle('on');
-	                document.getElementById('auto-label').textContent = sw.classList.contains('on') ? '已开启' : '已关闭';
+	                const enabled = typeof r.auto_update_enabled === 'boolean' ? r.auto_update_enabled : !on;
+	                setSwitchState(sw, enabled);
+	                document.getElementById('auto-label').textContent = enabled ? '已开启' : '已关闭';
 	            }
 	        }
 
@@ -2644,9 +2896,10 @@
 	            const on = sw.classList.contains('on');
 	            const r = await api('/api/config/pricing-auto', { method: 'POST', body: JSON.stringify({ enabled: !on }) });
 	            if (r?.success) {
-	                sw.classList.toggle('on');
+	                const enabled = typeof r.pricing_auto_enabled === 'boolean' ? r.pricing_auto_enabled : !on;
+	                setSwitchState(sw, enabled);
 	                const label = document.getElementById('pricing-auto-label');
-	                if (label) label.textContent = sw.classList.contains('on') ? '已开启' : '已关闭';
+	                if (label) label.textContent = enabled ? '已开启' : '已关闭';
 	                // 切换后立即刷新，让价格与来源信息同步
 	                refreshStatus();
 	            } else {
@@ -2740,10 +2993,10 @@
                 el.innerHTML = '<div style="color:var(--danger);">验证请求失败</div>';
             } else if (r.valid) {
                 el.innerHTML = `<div style="color:var(--success);font-size:18px;text-align:center;padding:20px;">✓ 配置格式有效</div>` +
-                    (r.warnings.length ? `<div style="margin-top:10px;"><div style="color:var(--warning);font-weight:600;">警告:</div>${r.warnings.map(w => `<div style="font-size:12px;margin-top:4px;">• ${w}</div>`).join('')}</div>` : '');
+                    ((r.warnings || []).length ? `<div style="margin-top:10px;"><div style="color:var(--warning);font-weight:600;">警告:</div>${r.warnings.map(w => `<div style="font-size:12px;margin-top:4px;">• ${escapeHtml(w)}</div>`).join('')}</div>` : '');
             } else {
                 el.innerHTML = `<div style="color:var(--danger);font-size:18px;text-align:center;padding:20px;">✗ 配置格式无效</div>` +
-                    `<div style="margin-top:10px;"><div style="color:var(--danger);font-weight:600;">错误:</div>${r.errors.map(e => `<div style="font-size:12px;margin-top:4px;">• ${e}</div>`).join('')}</div>`;
+                    `<div style="margin-top:10px;"><div style="color:var(--danger);font-weight:600;">错误:</div>${(r.errors || []).map(e => `<div style="font-size:12px;margin-top:4px;">• ${escapeHtml(e)}</div>`).join('')}</div>`;
             }
             document.getElementById('validate-modal').classList.add('active');
         }
@@ -2808,13 +3061,16 @@
 	        initPricingInputs();
 	        initUpdateSettingsInputs();
         refreshAll();
-        // 每5秒刷新一次状态和资源监控
+        // 页面隐藏时暂停轮询，避免后台标签持续消耗服务器和浏览器资源。
         setInterval(() => {
+            if (document.hidden) return;
             refreshStatus();
             refreshResources();
         }, 5000);
-        // 每10秒刷新日志
-        setInterval(refreshCliLogs, 10000);
+        setInterval(() => { if (!document.hidden) refreshCliLogs(); }, 10000);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) refreshAll();
+        });
     </script>
 </body>
 </html>

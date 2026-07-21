@@ -1,4 +1,8 @@
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 *.pyc
 *.pyo
 *.pyd

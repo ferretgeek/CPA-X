@@ -6,11 +6,11 @@
 
 部署完成后必须满足：
 
-1. `GET /` 能打开页面
+1. `GET /api/healthz` 返回 `ok=true`，`GET /` 能打开页面
 2. `GET /api/status` 返回 `health=healthy|degraded|unhealthy` 且不报错
 3. `GET /api/models` 能返回 models（如果上游要求 key，必须配置）
 4. “请求统计”里的 token 口径正确：`total = input + output (+ reasoning)`，不重复计算 cached
-5. 自动更新：在空闲时可完成 `stop -> 下载 -> 替换二进制 -> start`
+5. 自动更新：在空闲时可完成 `在线准备并校验 -> stop -> 原子替换 -> start -> 稳定性检查`，失败时自动回滚
 6. 费用估算有意义：Token 价格非 0（支持自动同步 OpenRouter 定价或手动设置）
 
 ## 1) 一键安装（推荐）
@@ -63,7 +63,7 @@ systemctl restart cliproxy-panel
 
 `scripts/doctor.py` 会尝试：
 
-- 找到正在运行的 CLIProxyAPI systemd unit（如 `cliproxyapi@freecodex.service` 或 `cli-proxy-api.service`）
+- 找到已加载的 CLIProxyAPI systemd unit（包括已停止的 unit，如 `cliproxyapi@freecodex.service` 或 `cli-proxy-api.service`）
 - 解析 `ExecStart`，推导：
   - `CLIPROXY_PANEL_CLIPROXY_BINARY`
   - `CLIPROXY_PANEL_CLIPROXY_CONFIG`
@@ -99,6 +99,7 @@ systemctl restart cliproxy-panel
 
 面板提供了这些关键 API（用于你做自动化验收）：
 
+- `GET /api/healthz`：无需面板密钥的最小存活探针，不泄露配置细节
 - `GET /api/health`：健康检查与细项
 - `GET /api/status`：聚合状态（含版本、统计、更新状态）
 - `GET /api/check-update`：检查最新版本
@@ -118,9 +119,29 @@ systemctl restart cliproxy-panel
 - 默认开启自动同步：当手动价格为 0 时，面板会从 OpenRouter 获取 `prompt/completion/input_cache_read` 的定价并换算后使用
 - 如需严格使用手动价格：设置 `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false`（或在页面里关闭“自动同步价格”开关）
 
+## 5.2) 跨时区日志与自动更新
+
+- 保持 `CLIPROXY_PANEL_LOG_TIMEZONE=auto` 时，面板会比较 CLIProxy 日志中的本地时间与文件 mtime，按 15 分钟粒度推断 `UTC-12:00` 到 `UTC+14:00` 的偏移。
+- 如果部署地使用夏令时或日志文件不可用于推断，显式设置 IANA 时区（例如 `America/New_York`）最可靠。
+- 面板对外输出的日志、更新历史和健康检查时间统一为带 `Z` 的 UTC RFC 3339；浏览器负责转换为访问者本地时间。
+- 请求日志缺失时，面板不会把“未知”误判成“空闲”，因此自动更新会等待而不是中断可能存在的流量。
+
+## 5.3) 更新与磁盘上限
+
+- 默认仅保留 2 个 CLIProxy 二进制回滚点，同时受 14 天和 512 MiB 总逻辑大小限制。
+- 默认要求 release 的 `checksums.txt` 中存在匹配 SHA-256；校验失败不会停服务或替换二进制。
+- “清空统计”不再复制或截断巨型服务日志；页面日志区的“清空”也只影响当前浏览器显示。
+
+## 5.4) CLIProxyAPI v6/v7 用量兼容
+
+- v6 的累计 `/v0/management/usage` 与 v7 的 `/v0/management/usage-queue` 会被自动识别，切换计数模式时先建立基线，避免重复累计。
+- v7 队列默认只短期保留记录，面板会每 15 秒拉取并立即原子持久化；必须在 CLIProxyAPI 的 `config.yaml` 中设置 `usage-statistics-enabled: true`。
+- `/api/health` 会在该开关被显式关闭时给出警告。
+
 ## 6) 安全默认值（AI 不要破坏）
 
 - 当前默认 `CLIPROXY_PANEL_BIND_HOST=0.0.0.0`
 - 如需外网访问，建议同时设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`
+- 跨域 API 默认关闭；只为明确来源配置 `CLIPROXY_PANEL_CORS_ORIGINS`
 - 前端已移除导出入口，不要再帮用户恢复浏览器侧导出按钮
 - 主配置写回默认关闭；如用户明确要求恢复，才引导其在 `.env` 中设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`

@@ -1,31 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CPA-X 管理面板后端 v2.1.2
+CPA-X 管理面板后端 v2.2.0
 功能: 为 CLIProxyAPI 提供监控统计、健康检查、资源监控、配置管理、API测试、模型管理
 优化: 缓存机制、预编译正则、非阻塞监控、减少shell调用
 """
 
 import os
+import atexit
 import json
 import time
+import math
 import subprocess
 import threading
 import re
 import platform
 import shutil
-import shlex
+import stat as stat_module
 import tempfile
 import tarfile
-from datetime import datetime, timedelta
+import hashlib
+import hmac
+import random
+import signal
+import socket
+from datetime import datetime, timedelta, timezone
 from collections import deque
+from urllib.parse import urlsplit, urlunsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 import requests
+from requests.adapters import HTTPAdapter
 
 # 面板自身版本（与 GitHub Release/README 同步）
 PANEL_NAME = "CPA-X"
-PANEL_VERSION = "2.1.2"
+PANEL_VERSION = "2.2.0"
 PRICING_BASIS_TOKENS = 1_000_000
 PRICING_BASIS_LABEL = '百万Tokens'
 PRICING_BASIS_TEXT = f'美元/{PRICING_BASIS_LABEL}'
@@ -33,18 +43,28 @@ PRICING_BASIS_TEXT = f'美元/{PRICING_BASIS_LABEL}'
 # ==================== 预编译正则表达式 ====================
 # 日志格式: [2026-01-17 05:21:09] [--------] [info ] [gin_logger.go:92] 200 |            0s |       127.0.0.1 | GET     "/v1/models"
 REQUEST_LOG_PATTERN = re.compile(
-    r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*\[gin_logger\.go:\d+\]\s+(\d+)\s+\|\s+(\S+)\s+\|([\d\s.]+)\|\s+(\w+)\s+"([^"]+)"'
+    r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*\[gin_logger\.go:\d+\]\s+(\d+)\s+\|\s+(\S+)\s+\|\s*([^|]+?)\s*\|\s+([A-Z]+)\s+"([^"]+)"'
 )
+REQUEST_METHOD_PATTERN = re.compile(r'\|\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+"')
+REQUEST_STATUS_PATTERN = re.compile(r'\[gin_logger\.go:\d+\]\s+(\d{3})\s+\|')
 HASH_VERSION_PATTERN = re.compile(r'^[0-9a-f]{7,40}$', re.IGNORECASE)
 EXCLUDED_LOG_PATHS = (
-    '"/v0/management/usage"',
     '"/v0/management/',
-    '"/v1/models"',
+    '"/v1/models',
 )
 MANAGEMENT_AUTH_MAX_FAILURES = 10
 MANAGEMENT_AUTH_FAILURE_STATUSES = {401, 403}
-BACKUP_RETENTION_COUNT = 5
-BACKUP_TS_PATTERN = re.compile(r'\.bak\.(\d{8}-\d{6})$')
+MAX_MODEL_USAGE_ENTRIES = 500
+BACKUP_RETENTION_COUNT = 2
+BACKUP_TS_PATTERN = re.compile(r'\.bak\.(\d{8}-\d{6}(?:-\d{6})?)$')
+LOG_TIME_PATTERN = re.compile(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]')
+VERSION_PATTERN = re.compile(
+    r'^[vV]?(?P<release>\d+(?:\.\d+){1,3})'
+    r'(?P<suffix>(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$'
+)
+TIMEZONE_OFFSET_PATTERN = re.compile(r'^(?:UTC|GMT)?(?P<sign>[+-])(?P<hours>\d{1,2})(?::?(?P<minutes>\d{2}))?$', re.IGNORECASE)
+UTC = timezone.utc
+BUNDLED_QUOTES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'X.txt')
 
 # 可选依赖
 try:
@@ -61,8 +81,15 @@ except ImportError:
     HAS_YAML = False
     print("Warning: pyyaml not installed. Config validation will be limited.")
 
+try:
+    from waitress import serve as waitress_serve
+    HAS_WAITRESS = True
+except ImportError:
+    waitress_serve = None
+    HAS_WAITRESS = False
+
 app = Flask(__name__, static_folder='static', static_url_path='')
-CORS(app)
+app.config['MAX_CONTENT_LENGTH'] = 3 * 1024 * 1024
 
 # 配置
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -80,6 +107,9 @@ CONFIG = {
     'idle_threshold_seconds': 1800,  # 30分钟
     'auto_update_check_interval': 300,
     'auto_update_enabled': True,
+    # CLIProxyAPI 使用进程本地时区写入无偏移日志。auto 会从日志时间与文件 mtime 推断，
+    # 也可显式填写 local、UTC、+08:00 或 IANA 时区（如 Asia/Shanghai）。
+    'log_timezone': 'auto',
     'cliproxy_api_port': 8317,  # CLIProxy API端口
     'cliproxy_api_base': 'http://127.0.0.1',
     'models_api_key': '',
@@ -97,18 +127,34 @@ CONFIG = {
     'pricing_auto_model': '',  # 为空时会从 config.yaml 里挑一个模型，最后回退到 openai/gpt-4o-mini
     'quotes_path': os.path.join(BASE_DIR, 'X.txt'),
     'disk_path': '/',
+    # 二进制备份同时受数量、保留天数和总大小限制，避免长期自动更新挤满磁盘。
+    'backup_retention_count': BACKUP_RETENTION_COUNT,
+    'backup_max_age_days': 14,
+    'backup_max_total_mb': 512,
+    'log_initial_scan_max_mb': 64,
+    'log_clear_enabled': False,
+    'update_require_checksum': True,
     # 默认监听全部网卡，保持面板部署后可从局域网访问；如需仅本机访问，可显式设置为 127.0.0.1
     'bind_host': '0.0.0.0',
     'panel_access_key': '',
+    # 逗号分隔的跨域来源；留空时仅允许浏览器同源访问。
+    'cors_origins': '',
 }
 
 ENV_PREFIX = 'CLIPROXY_PANEL_'
+dotenv_lock = threading.Lock()
 
 CONFIG_TYPES = {
     'panel_port': int,
     'idle_threshold_seconds': int,
     'auto_update_check_interval': int,
     'auto_update_enabled': bool,
+    'backup_retention_count': int,
+    'backup_max_age_days': int,
+    'backup_max_total_mb': int,
+    'log_initial_scan_max_mb': int,
+    'log_clear_enabled': bool,
+    'update_require_checksum': bool,
     'config_write_enabled': bool,
     'cliproxy_api_port': int,
     'pricing_input': float,
@@ -123,16 +169,16 @@ def _panel_access_key_expected() -> str:
 
 
 def _panel_access_key_provided() -> str:
-    return str(
-        request.headers.get('X-Panel-Key')
-        or request.args.get('panel_key')
-        or request.cookies.get('panel_key')
-        or ''
-    ).strip()
+    # Mutating APIs deliberately accept the secret only through a custom
+    # header. Cookie/query authentication would make CSRF and access-log leaks
+    # much easier; the SPA converts its one-time URL parameter into this header.
+    return str(request.headers.get('X-Panel-Key') or '').strip()
 
 
 @app.before_request
 def _enforce_panel_access_key():
+    if request.path == '/api/healthz':
+        return None
     expected = _panel_access_key_expected()
     if not expected:
         return None
@@ -145,7 +191,7 @@ def _enforce_panel_access_key():
     if not request.path.startswith('/api'):
         return None
 
-    if _panel_access_key_provided() != expected:
+    if not hmac.compare_digest(_panel_access_key_provided(), expected):
         return jsonify({'success': False, 'error': 'Unauthorized'}), 401
 
     return None
@@ -188,7 +234,14 @@ def _load_dotenv():
                     continue
                 key, value = line.split('=', 1)
                 key = key.strip()
-                value = value.strip().strip('"').strip("'")
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] == '"':
+                    try:
+                        value = json.loads(value)
+                    except (TypeError, ValueError):
+                        value = value[1:-1]
+                elif len(value) >= 2 and value[0] == value[-1] == "'":
+                    value = value[1:-1]
                 values[key] = value
     except Exception as e:
         print(f"Warning: failed to load .env: {e}")
@@ -198,43 +251,111 @@ def _load_dotenv():
 def _format_env_value(value):
     if isinstance(value, bool):
         return 'true' if value else 'false'
-    return str(value)
+    value_text = str(value)
+    if '\n' in value_text or '\r' in value_text:
+        raise ValueError('Environment values cannot contain newlines')
+    if value_text != value_text.strip() or value_text.startswith(('"', "'")) or value_text.endswith(('"', "'")):
+        return json.dumps(value_text, ensure_ascii=False)
+    return value_text
+
+
+def _fsync_parent_directory(path):
+    """Best-effort directory sync so an atomic rename survives power loss."""
+    if os.name == 'nt':
+        return
+    directory = os.path.dirname(os.path.abspath(path))
+    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
+    try:
+        descriptor = os.open(directory, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+
+
+def _atomic_write_text(path, content, *, encoding='utf-8', mode=None):
+    """Write a file in the same directory and atomically replace the destination."""
+    if not path:
+        raise ValueError('Path is required')
+    target = os.path.abspath(os.fspath(path))
+    parent = os.path.dirname(target)
+    os.makedirs(parent, exist_ok=True)
+
+    existing_mode = None
+    try:
+        existing_mode = os.stat(target).st_mode & 0o777
+    except OSError:
+        pass
+
+    fd, temp_path = tempfile.mkstemp(prefix=f'.{os.path.basename(target)}.', suffix='.tmp', dir=parent)
+    try:
+        with os.fdopen(fd, 'w', encoding=encoding, newline='') as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            desired_mode = (existing_mode & mode) if existing_mode is not None else mode
+        else:
+            desired_mode = existing_mode
+        if desired_mode is not None:
+            try:
+                os.chmod(temp_path, desired_mode)
+            except OSError:
+                pass
+        os.replace(temp_path, target)
+        _fsync_parent_directory(target)
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_json(path, payload, *, mode=None):
+    content = json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
+    _atomic_write_text(path, content, mode=mode)
+
+
+def _load_json_file_limited(path, max_bytes):
+    if os.path.getsize(path) > max_bytes:
+        raise ValueError(f'JSON file exceeds the {max_bytes}-byte limit')
+    with open(path, 'r', encoding='utf-8') as handle:
+        return json.load(handle)
 
 
 def _update_dotenv_values(updates):
     env_path = os.path.join(BASE_DIR, '.env')
-    env_updates = {f'{ENV_PREFIX}{key.upper()}': _format_env_value(val) for key, val in updates.items()}
-    lines = []
-
-    if os.path.exists(env_path):
-        try:
-            with open(env_path, 'r', encoding='utf-8') as f:
-                lines = f.read().splitlines()
-        except Exception as e:
-            print(f"Warning: failed to read .env: {e}")
-
-    updated = set()
-    new_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith('#') or '=' not in line:
-            new_lines.append(line)
-            continue
-        key, _ = line.split('=', 1)
-        key = key.strip()
-        if key in env_updates:
-            new_lines.append(f"{key}={env_updates[key]}")
-            updated.add(key)
-        else:
-            new_lines.append(line)
-
-    for key, value in env_updates.items():
-        if key not in updated:
-            new_lines.append(f"{key}={value}")
-
     try:
-        with open(env_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(new_lines) + '\n')
+        env_updates = {f'{ENV_PREFIX}{key.upper()}': _format_env_value(val) for key, val in updates.items()}
+        with dotenv_lock:
+            lines = []
+            if os.path.exists(env_path):
+                with open(env_path, 'r', encoding='utf-8') as f:
+                    lines = f.read().splitlines()
+
+            updated = set()
+            new_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#') or '=' not in line:
+                    new_lines.append(line)
+                    continue
+                key, _ = line.split('=', 1)
+                key = key.strip()
+                if key in env_updates:
+                    new_lines.append(f"{key}={env_updates[key]}")
+                    updated.add(key)
+                else:
+                    new_lines.append(line)
+
+            for key, value in env_updates.items():
+                if key not in updated:
+                    new_lines.append(f"{key}={value}")
+
+            _atomic_write_text(env_path, '\n'.join(new_lines) + '\n', mode=0o600)
         return True
     except Exception as e:
         print(f"Warning: failed to save .env: {e}")
@@ -278,9 +399,229 @@ def load_config_overrides():
 
 load_config_overrides()
 
+cors_origins = [origin.strip() for origin in str(CONFIG.get('cors_origins') or '').split(',') if origin.strip()]
+if cors_origins:
+    CORS(app, resources={r'/api/*': {'origins': cors_origins}}, supports_credentials=False)
+
+
+@app.after_request
+def _set_security_headers(response):
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'DENY')
+    response.headers.setdefault('Referrer-Policy', 'no-referrer')
+    response.headers.setdefault('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+    response.headers.setdefault(
+        'Content-Security-Policy',
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    )
+    if request.is_secure:
+        response.headers.setdefault('Strict-Transport-Security', 'max-age=31536000')
+    if request.path == '/':
+        response.headers.setdefault('Cache-Control', 'no-cache')
+    return response
+
+
+def _utc_now():
+    return datetime.now(UTC)
+
+
+def _utc_iso(value=None):
+    dt = value or _utc_now()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+
+def _parse_iso_datetime(value, *, assume_timezone=UTC):
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value or '').strip()
+        if not raw:
+            return None
+        if raw.endswith(('Z', 'z')):
+            raw = raw[:-1] + '+00:00'
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            try:
+                dt = datetime.strptime(raw, '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=assume_timezone)
+    return dt
+
+
+def _timezone_from_setting(setting):
+    value = str(setting or 'auto').strip()
+    lowered = value.lower()
+    if lowered == 'auto':
+        return None, 'auto'
+    if lowered in {'local', 'system'}:
+        return datetime.now().astimezone().tzinfo or UTC, 'local'
+    if lowered in {'utc', 'z', 'gmt'}:
+        return UTC, 'UTC'
+
+    offset_match = TIMEZONE_OFFSET_PATTERN.match(value)
+    if offset_match:
+        hours = int(offset_match.group('hours'))
+        minutes = int(offset_match.group('minutes') or 0)
+        if hours > 14 or minutes > 59 or (hours == 14 and minutes != 0):
+            raise ValueError(f'Invalid timezone offset: {value}')
+        offset = timedelta(hours=hours, minutes=minutes)
+        if offset_match.group('sign') == '-':
+            offset = -offset
+        return timezone(offset), value
+
+    try:
+        return ZoneInfo(value), value
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f'Unknown timezone: {value}') from exc
+
+
+def _infer_timezone_offset_seconds(log_time, file_mtime):
+    """Infer CLIProxy's UTC offset by comparing its latest local log time to file mtime."""
+    if not log_time or file_mtime is None:
+        return None
+    try:
+        naive = datetime.strptime(str(log_time), '%Y-%m-%d %H:%M:%S')
+        raw_offset = naive.replace(tzinfo=UTC).timestamp() - float(file_mtime)
+    except (TypeError, ValueError, OSError):
+        return None
+
+    # Real-world UTC offsets use 15-minute increments. Allow a small write/flush delay.
+    step = 15 * 60
+    rounded = int(round(raw_offset / step) * step)
+    if abs(raw_offset - rounded) > 5 * 60 or not (-12 * 3600 <= rounded <= 14 * 3600):
+        return None
+    return rounded
+
+
+def _log_timezone(offset_seconds=None):
+    setting = CONFIG.get('log_timezone', 'auto')
+    try:
+        configured, source = _timezone_from_setting(setting)
+    except ValueError as exc:
+        print(f'Warning: {exc}; falling back to system local timezone')
+        configured, source = datetime.now().astimezone().tzinfo or UTC, 'local-fallback'
+    if configured is not None:
+        return configured, source
+    if offset_seconds is not None:
+        offset_seconds = max(-12 * 3600, min(14 * 3600, int(offset_seconds)))
+        return timezone(timedelta(seconds=offset_seconds)), 'auto-inferred'
+    return datetime.now().astimezone().tzinfo or UTC, 'auto-local-fallback'
+
+
+def _log_time_to_utc(value, offset_seconds=None):
+    if not value:
+        return None
+    raw = str(value).strip()
+    parsed = _parse_iso_datetime(raw)
+    if parsed is None:
+        return None
+    # A plain CLIProxy timestamp has no offset and must use the log source timezone.
+    if not re.search(r'(?:Z|[+-]\d{2}:?\d{2})$', raw, re.IGNORECASE):
+        setting = str(CONFIG.get('log_timezone', 'auto') or 'auto').strip().lower()
+        if setting in {'local', 'system'} or (setting == 'auto' and offset_seconds is None):
+            # astimezone() on a naive datetime asks the operating system for the
+            # offset at that historical instant, including DST transitions.
+            return parsed.replace(tzinfo=None).astimezone(UTC)
+        tz, _ = _log_timezone(offset_seconds)
+        parsed = parsed.replace(tzinfo=tz)
+    return parsed.astimezone(UTC)
+
+
+def _log_time_iso(value, offset_seconds=None):
+    parsed = _log_time_to_utc(value, offset_seconds)
+    return _utc_iso(parsed) if parsed else None
+
+
+def _compose_api_base_url(base_url=None, port=None):
+    raw = str(base_url if base_url is not None else CONFIG.get('cliproxy_api_base', '') or '').strip().rstrip('/')
+    if not raw:
+        raw = 'http://127.0.0.1'
+    if '://' not in raw:
+        raw = f'http://{raw}'
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {'http', 'https'} or not parsed.hostname:
+        raise ValueError(f'Invalid CLIProxy API base URL: {raw}')
+    if parsed.username or parsed.password:
+        raise ValueError('CLIProxy API base URL must not contain credentials')
+
+    selected_port = parsed.port
+    if selected_port is None and port:
+        selected_port = int(port)
+    host = parsed.hostname
+    if ':' in host and not host.startswith('['):
+        host = f'[{host}]'
+    netloc = f'{host}:{selected_port}' if selected_port else host
+    return urlunsplit((parsed.scheme, netloc, parsed.path.rstrip('/'), '', ''))
+
+
+def _api_host_port():
+    base_url = _compose_api_base_url()
+    parsed = urlsplit(base_url)
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    return parsed.hostname, port
+
+
+def _normalize_runtime_config():
+    """Keep malformed environment overrides from breaking the whole panel."""
+    def as_int(value, fallback):
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return fallback
+
+    def as_float(value, fallback):
+        try:
+            return float(value)
+        except (TypeError, ValueError, OverflowError):
+            return fallback
+
+    bounded_ints = {
+        'panel_port': (1, 65535, 8080),
+        'cliproxy_api_port': (1, 65535, 8317),
+        'idle_threshold_seconds': (10, 7 * 86400, 1800),
+        'auto_update_check_interval': (60, 86400, 300),
+        'backup_retention_count': (1, 20, BACKUP_RETENTION_COUNT),
+        'backup_max_age_days': (1, 3650, 14),
+        'backup_max_total_mb': (16, 10240, 512),
+        'log_initial_scan_max_mb': (1, 1024, 64),
+    }
+    for key, (minimum, maximum, fallback) in bounded_ints.items():
+        value = as_int(CONFIG.get(key), fallback)
+        if not minimum <= value <= maximum:
+            print(f'Warning: invalid {key}={CONFIG.get(key)!r}; using {fallback}')
+            value = fallback
+        CONFIG[key] = value
+
+    for key in ('pricing_input', 'pricing_output', 'pricing_cache'):
+        value = as_float(CONFIG.get(key), 0.0)
+        CONFIG[key] = value if math.isfinite(value) and 0 <= value <= 1_000_000 else 0.0
+
+    bind_host = str(CONFIG.get('bind_host') or '').strip()
+    CONFIG['bind_host'] = bind_host or '0.0.0.0'
+    try:
+        _timezone_from_setting(CONFIG.get('log_timezone', 'auto'))
+    except ValueError as exc:
+        print(f'Warning: {exc}; using auto log timezone detection')
+        CONFIG['log_timezone'] = 'auto'
+
+
+_normalize_runtime_config()
+
 
 def is_config_write_enabled():
     return _parse_bool(CONFIG.get('config_write_enabled', False))
+
+
+def _request_json_object():
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else None
 
 
 def config_write_blocked_response():
@@ -298,8 +639,10 @@ state = {
     'last_update_result': None,
     'last_auto_update_check_time': None,
     'next_auto_update_check_time': None,
+    'next_auto_update_check_monotonic': None,
     'current_version': 'unknown',
     'latest_version': 'unknown',
+    'has_update': False,
     'auto_update_enabled': CONFIG['auto_update_enabled'],
     'request_log': [],
     # 统计数据
@@ -309,6 +652,7 @@ state = {
         'failed_requests': 0,
         'input_tokens': 0,
         'output_tokens': 0,
+        'reasoning_tokens': 0,
         'cached_tokens': 0,
         'total_response_time': 0,
         'requests_per_minute': deque(maxlen=60),
@@ -321,6 +665,7 @@ state = {
     'last_snapshot': {
         'input_tokens': 0,
         'output_tokens': 0,
+        'reasoning_tokens': 0,
         'cached_tokens': 0,
         'total_requests': 0,
         'success': 0,
@@ -330,7 +675,15 @@ state = {
     'accumulated_stats': {
         'input_tokens': 0,
         'output_tokens': 0,
+        'reasoning_tokens': 0,
         'cached_tokens': 0,
+        'total_requests': 0,
+        'success': 0,
+        'failure': 0,
+    },
+    # Optional counters submitted through /api/record-request. Keep them
+    # separate so refreshing a live upstream snapshot cannot erase them.
+    'recorded_stats': {
         'total_requests': 0,
         'success': 0,
         'failure': 0,
@@ -344,15 +697,30 @@ state = {
         'last_error': None,
         'last_failure_time': None,
     },
+    'usage_snapshot_source': 'none',
+    'usage_snapshot_time': None,
+    'usage_api_kind': 'unknown',
+    # v6 exposes cumulative snapshots; v7 exposes a destructive usage queue.
+    # Persist the active accounting mode so switching formats cannot double-count.
+    'usage_counter_mode': 'cumulative',
+    # When stats are cleared while the upstream usage endpoint is unavailable,
+    # the first recovered live snapshot becomes the new baseline.
+    'usage_reset_pending': False,
     'log_stats': {
         'initialized': False,
         'offset': 0,
         'last_size': 0,
         'last_mtime': None,
+        'file_identity': None,
         'total': 0,
         'success': 0,
         'failed': 0,
         'last_time': None,
+        'latest_log_time': None,
+        'timezone_offset_seconds': None,
+        'timezone_source': 'unknown',
+        'partial': False,
+        'skipped_bytes': 0,
         'buffer': '',
         'base_total': 0,
         'base_success': 0,
@@ -363,10 +731,33 @@ state = {
 }
 
 log_lock = threading.Lock()
+quotes_lock = threading.Lock()
 log_stats_lock = threading.Lock()
 stats_lock = threading.Lock()
 persistent_stats_lock = threading.Lock()
 management_auth_lock = threading.Lock()
+usage_snapshot_lock = threading.Lock()
+usage_fetch_lock = threading.Lock()
+update_history_lock = threading.Lock()
+update_lock = threading.Lock()
+auto_update_wakeup = threading.Event()
+
+http_session = requests.Session()
+http_session.headers.update({'User-Agent': f'{PANEL_NAME}/{PANEL_VERSION}'})
+http_adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=0)
+http_session.mount('http://', http_adapter)
+http_session.mount('https://', http_adapter)
+
+
+def _response_json_limited(response, max_bytes):
+    content_length = _safe_int(response.headers.get('Content-Length'), 0)
+    if content_length and content_length > max_bytes:
+        raise ValueError(f'JSON response exceeds the {max_bytes}-byte limit')
+    raw = response.raw.read(max_bytes + 1, decode_content=True)
+    if len(raw) > max_bytes:
+        raise ValueError(f'JSON response exceeds the {max_bytes}-byte limit')
+    encoding = response.encoding or 'utf-8'
+    return json.loads(raw.decode(encoding, errors='strict'))
 
 # ==================== 持久化统计系统 ====================
 PERSISTENT_STATS_FIELDS = (
@@ -375,6 +766,7 @@ PERSISTENT_STATS_FIELDS = (
     'failed_requests',
     'input_tokens',
     'output_tokens',
+    'reasoning_tokens',
     'cached_tokens',
     'model_usage',
 )
@@ -385,22 +777,25 @@ def load_persistent_stats():
     def safe_int(v, default=0):
         try:
             return int(v)
-        except:
+        except (TypeError, ValueError):
             return default
     
-    path = CONFIG.get('persistent_stats_path')
+    path = _resolve_panel_path(CONFIG.get('persistent_stats_path'))
     if not path or not os.path.exists(path):
         return False
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        data = _load_json_file_limited(path, 8 * 1024 * 1024)
         if not isinstance(data, dict):
             return False
         with stats_lock:
             for key in PERSISTENT_STATS_FIELDS:
                 if key in data:
                     if key == 'model_usage':
-                        state['stats'][key] = data[key] if isinstance(data[key], dict) else {}
+                        loaded_models = data[key] if isinstance(data[key], dict) else {}
+                        state['stats'][key] = {
+                            str(model)[:200]: max(0, safe_int(count))
+                            for model, count in list(loaded_models.items())[:MAX_MODEL_USAGE_ENTRIES]
+                        }
                     else:
                         state['stats'][key] = safe_int(data[key])
             # 加载累计统计值
@@ -413,6 +808,13 @@ def load_persistent_stats():
                 for key in state['last_snapshot']:
                     if key in data['last_snapshot']:
                         state['last_snapshot'][key] = safe_int(data['last_snapshot'][key])
+            if 'recorded_stats' in data and isinstance(data['recorded_stats'], dict):
+                for key in state['recorded_stats']:
+                    if key in data['recorded_stats']:
+                        state['recorded_stats'][key] = max(0, safe_int(data['recorded_stats'][key]))
+            mode = str(data.get('usage_counter_mode', 'cumulative') or 'cumulative').strip().lower()
+            state['usage_counter_mode'] = mode if mode in {'cumulative', 'queue'} else 'cumulative'
+            state['usage_reset_pending'] = bool(data.get('usage_reset_pending', False))
             # 同步 request_count
             state['request_count'] = state['stats']['total_requests']
         print(f"Loaded persistent stats: accumulated={state['accumulated_stats']}, last_snapshot={state['last_snapshot']}")
@@ -424,38 +826,39 @@ def load_persistent_stats():
 
 def save_persistent_stats(force=False):
     """保存统计数据到磁盘"""
-    path = CONFIG.get('persistent_stats_path')
+    path = _resolve_panel_path(CONFIG.get('persistent_stats_path'))
     if not path:
         return False
     with persistent_stats_lock:
-        now = time.time()
+        now = time.monotonic()
         # 限制保存频率，除非强制保存
         last_saved = getattr(save_persistent_stats, '_last_saved', 0)
         if not force and now - last_saved < 10:
             return False
-        save_persistent_stats._last_saved = now
-    
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with stats_lock:
-            payload = {
-                'total_requests': state['stats'].get('total_requests', 0),
-                'successful_requests': state['stats'].get('successful_requests', 0),
-                'failed_requests': state['stats'].get('failed_requests', 0),
-                'input_tokens': state['stats'].get('input_tokens', 0),
-                'output_tokens': state['stats'].get('output_tokens', 0),
-                'cached_tokens': state['stats'].get('cached_tokens', 0),
-                'model_usage': dict(state['stats'].get('model_usage', {})),
-                'accumulated_stats': dict(state.get('accumulated_stats', {})),
-                'last_snapshot': dict(state.get('last_snapshot', {})),
-                'saved_at': datetime.now().isoformat(),
-            }
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        print(f"Warning: failed to save persistent stats: {e}")
-        return False
+        try:
+            with stats_lock:
+                payload = {
+                    'total_requests': state['stats'].get('total_requests', 0),
+                    'successful_requests': state['stats'].get('successful_requests', 0),
+                    'failed_requests': state['stats'].get('failed_requests', 0),
+                    'input_tokens': state['stats'].get('input_tokens', 0),
+                    'output_tokens': state['stats'].get('output_tokens', 0),
+                    'reasoning_tokens': state['stats'].get('reasoning_tokens', 0),
+                    'cached_tokens': state['stats'].get('cached_tokens', 0),
+                    'model_usage': dict(state['stats'].get('model_usage', {})),
+                    'accumulated_stats': dict(state.get('accumulated_stats', {})),
+                    'last_snapshot': dict(state.get('last_snapshot', {})),
+                    'recorded_stats': dict(state.get('recorded_stats', {})),
+                    'usage_counter_mode': str(state.get('usage_counter_mode', 'cumulative')),
+                    'usage_reset_pending': bool(state.get('usage_reset_pending', False)),
+                    'saved_at': _utc_iso(),
+                }
+            _atomic_write_json(path, payload, mode=0o600)
+            save_persistent_stats._last_saved = now
+            return True
+        except Exception as e:
+            print(f"Warning: failed to save persistent stats: {e}")
+            return False
 
 
 def _persistent_stats_worker():
@@ -486,14 +889,15 @@ class CacheManager:
         with self._lock:
             if key in self._cache:
                 value, timestamp = self._cache[key]
-                if time.time() - timestamp < max_age:
+                if time.monotonic() - timestamp < max_age:
                     return value
+                self._cache.pop(key, None)
         return None
 
     def set(self, key, value):
         """设置缓存值"""
         with self._lock:
-            self._cache[key] = (value, time.time())
+            self._cache[key] = (value, time.monotonic())
 
     def invalidate(self, key=None):
         """使缓存失效（key=None 表示清空全部）"""
@@ -519,11 +923,10 @@ def _safe_float(value, default=0.0):
 
 
 def _build_management_base_url():
-    base_url = CONFIG.get('cliproxy_api_base', 'http://127.0.0.1').rstrip('/')
-    api_port = CONFIG.get('cliproxy_api_port')
-    if api_port:
-        base_url = f'{base_url}:{api_port}'
-    return base_url
+    return _compose_api_base_url(
+        CONFIG.get('cliproxy_api_base', 'http://127.0.0.1'),
+        CONFIG.get('cliproxy_api_port'),
+    )
 
 
 def _management_headers():
@@ -540,9 +943,9 @@ def _management_headers():
 def _resolve_panel_path(path):
     if not path:
         return ''
-    path = str(path)
+    path = os.path.expandvars(os.path.expanduser(str(path)))
     if os.path.isabs(path):
-        return path
+        return os.path.abspath(path)
     return os.path.abspath(os.path.join(BASE_DIR, path))
 
 
@@ -595,7 +998,7 @@ def _reset_management_auth_state():
             'last_error': None,
             'last_failure_time': None,
         }
-    cache.invalidate('usage_snapshot')
+    cache.invalidate('usage_snapshot_envelope')
     cache.invalidate('local_version_mgmt')
     cache.invalidate('local_version')
     cache.invalidate('health_check')
@@ -628,7 +1031,7 @@ def _record_management_auth_failure(status_code, error=None):
             'locked': failures >= MANAGEMENT_AUTH_MAX_FAILURES,
             'last_status': status_code,
             'last_error': str(error or f'HTTP {status_code}'),
-            'last_failure_time': datetime.now().isoformat(),
+            'last_failure_time': _utc_iso(),
         })
         state['management_auth'] = auth_state
     cache.invalidate('health_check')
@@ -645,30 +1048,29 @@ def _observe_management_response(resp):
 
 
 def load_usage_snapshot_from_disk():
-    path = CONFIG.get('usage_snapshot_path')
+    path = _resolve_panel_path(CONFIG.get('usage_snapshot_path'))
     if not path:
         return None
     try:
         if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            loaded = _load_json_file_limited(path, 32 * 1024 * 1024)
+            return loaded if isinstance(loaded, dict) else None
     except Exception as e:
         print(f"Warning: failed to load usage snapshot: {e}")
     return None
 
 
 def save_usage_snapshot(snapshot):
-    path = CONFIG.get('usage_snapshot_path')
+    path = _resolve_panel_path(CONFIG.get('usage_snapshot_path'))
     if not path or snapshot is None:
         return False
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(snapshot, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        print(f"Warning: failed to save usage snapshot: {e}")
-        return False
+    with usage_snapshot_lock:
+        try:
+            _atomic_write_json(path, snapshot, mode=0o600)
+            return True
+        except Exception as e:
+            print(f"Warning: failed to save usage snapshot: {e}")
+            return False
 
 
 LOG_STATS_PERSIST_FIELDS = (
@@ -676,10 +1078,16 @@ LOG_STATS_PERSIST_FIELDS = (
     'offset',
     'last_size',
     'last_mtime',
+    'file_identity',
     'total',
     'success',
     'failed',
     'last_time',
+    'latest_log_time',
+    'timezone_offset_seconds',
+    'timezone_source',
+    'partial',
+    'skipped_bytes',
     'base_total',
     'base_success',
     'base_failed',
@@ -690,7 +1098,7 @@ def _ensure_parent_dir(path):
     if not path:
         return False
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         return True
     except Exception as e:
         print(f"Warning: failed to create directory for {path}: {e}")
@@ -698,12 +1106,11 @@ def _ensure_parent_dir(path):
 
 
 def load_log_stats_state():
-    path = CONFIG.get('log_stats_path')
+    path = _resolve_panel_path(CONFIG.get('log_stats_path'))
     if not path or not os.path.exists(path):
         return False
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        data = _load_json_file_limited(path, 1024 * 1024)
         if not isinstance(data, dict):
             return False
         with log_stats_lock:
@@ -721,64 +1128,201 @@ def load_log_stats_state():
 
 
 def save_log_stats_state(force=False):
-    path = CONFIG.get('log_stats_path')
+    path = _resolve_panel_path(CONFIG.get('log_stats_path'))
     if not path:
         return False
     with log_stats_lock:
         log_state = state.get('log_stats', {})
-        now = time.time()
+        now = time.monotonic()
         last_saved = _safe_float(log_state.get('last_saved_ts', 0), 0.0)
         if not force and now - last_saved < 5:
             return False
         payload = {key: log_state.get(key) for key in LOG_STATS_PERSIST_FIELDS}
         log_state['last_saved_ts'] = now
         state['log_stats'] = log_state
-    if not _ensure_parent_dir(path):
-        return False
     try:
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(path, payload, mode=0o600)
         return True
     except Exception as e:
         print(f"Warning: failed to save log stats: {e}")
         return False
 
 
-def fetch_usage_snapshot(use_cache=True):
-    cache_key = 'usage_snapshot'
+def _apply_usage_queue_records(records):
+    """Persist v7 usage-queue events as deltas; returns accepted record count."""
+    if not isinstance(records, list):
+        return 0
+
+    delta = {
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'reasoning_tokens': 0,
+        'cached_tokens': 0,
+        'total_requests': 0,
+        'success': 0,
+        'failure': 0,
+    }
+    models = {}
+    for record in records:
+        if not isinstance(record, dict) or not any(
+            key in record for key in ('tokens', 'failed', 'model', 'timestamp')
+        ):
+            continue
+        tokens = record.get('tokens') if isinstance(record.get('tokens'), dict) else {}
+        input_tokens = max(0, _safe_int(tokens.get('input_tokens', 0)))
+        output_tokens = max(0, _safe_int(tokens.get('output_tokens', 0)))
+        raw_reasoning = max(0, _safe_int(tokens.get('reasoning_tokens', 0)))
+        total_tokens = max(0, _safe_int(tokens.get('total_tokens', 0)))
+        reasoning_extra = max(0, min(raw_reasoning, total_tokens - input_tokens - output_tokens))
+
+        delta['input_tokens'] += input_tokens
+        delta['output_tokens'] += output_tokens
+        delta['reasoning_tokens'] += reasoning_extra
+        delta['cached_tokens'] += max(0, _safe_int(tokens.get('cached_tokens', 0)))
+        delta['total_requests'] += 1
+        if record.get('failed') is True:
+            delta['failure'] += 1
+        else:
+            delta['success'] += 1
+        model = str(record.get('alias') or record.get('model') or 'unknown')[:200]
+        models[model] = models.get(model, 0) + 1
+
+    if not delta['total_requests']:
+        return 0
+
+    with stats_lock:
+        accumulated = state.setdefault('accumulated_stats', {})
+        for key, value in delta.items():
+            accumulated[key] = max(0, _safe_int(accumulated.get(key, 0))) + value
+        state['usage_counter_mode'] = 'queue'
+        state['usage_reset_pending'] = False
+
+        state['stats']['input_tokens'] = accumulated['input_tokens']
+        state['stats']['output_tokens'] = accumulated['output_tokens']
+        state['stats']['reasoning_tokens'] = accumulated['reasoning_tokens']
+        state['stats']['cached_tokens'] = accumulated['cached_tokens']
+        recorded = state.setdefault('recorded_stats', {})
+        state['stats']['total_requests'] = accumulated['total_requests'] + max(
+            0, _safe_int(recorded.get('total_requests', 0))
+        )
+        state['stats']['successful_requests'] = accumulated['success'] + max(
+            0, _safe_int(recorded.get('success', 0))
+        )
+        state['stats']['failed_requests'] = accumulated['failure'] + max(
+            0, _safe_int(recorded.get('failure', 0))
+        )
+        state['request_count'] = state['stats']['total_requests']
+        for model, count in models.items():
+            _increment_model_usage_locked(model, count)
+
+    # Queue reads remove upstream records, so durability cannot wait for the
+    # regular 30-second persistence timer.
+    save_persistent_stats(force=True)
+    return delta['total_requests']
+
+
+def _fetch_usage_queue(base_url, headers):
+    """Return (supported, accepted_count) for the CLIProxyAPI v7 queue."""
+    accepted_total = 0
+    batch_size = 500
+    for _ in range(4):
+        with http_session.get(
+            f'{base_url}/v0/management/usage-queue?count={batch_size}',
+            headers=headers,
+            timeout=(2, 4),
+            stream=True,
+        ) as resp:
+            _observe_management_response(resp)
+            if resp.status_code in {404, 405}:
+                return False, 0
+            resp.raise_for_status()
+            records = _response_json_limited(resp, 32 * 1024 * 1024)
+        if not isinstance(records, list):
+            raise ValueError('Usage queue endpoint did not return a JSON array')
+        accepted_total += _apply_usage_queue_records(records)
+        if len(records) < batch_size:
+            break
+    return True, accepted_total
+
+
+def fetch_usage_snapshot(use_cache=True, with_meta=False, *, allow_network=True):
+    cache_key = 'usage_snapshot_envelope'
     if use_cache:
-        cached = cache.get(cache_key, max_age=2)
+        cached = cache.get(cache_key, max_age=5)
         if cached is not None:
-            return cached
+            return (cached.get('data'), dict(cached)) if with_meta else cached.get('data')
+    def finish(snapshot, source):
+        envelope = {
+            'data': snapshot,
+            'source': source,
+            'live': source == 'live',
+            'fetched_at': _utc_iso(),
+        }
+        cache.set(cache_key, envelope)
+        with usage_snapshot_lock:
+            state['usage_snapshot_source'] = source
+            state['usage_snapshot_time'] = envelope['fetched_at']
+        return (snapshot, dict(envelope)) if with_meta else snapshot
+
+    if not allow_network:
+        snapshot = load_usage_snapshot_from_disk()
+        return finish(snapshot, 'disk' if snapshot is not None else 'none')
+
+    # Avoid making every dashboard refresh wait on an unreachable upstream.
+    if use_cache and cache.get('usage_snapshot_failure', max_age=15) is not None:
+        snapshot = load_usage_snapshot_from_disk()
+        return finish(snapshot, 'disk' if snapshot is not None else 'none')
 
     if _management_auth_locked():
         snapshot = load_usage_snapshot_from_disk()
-        if snapshot is not None:
-            cache.set(cache_key, snapshot)
-        return snapshot
+        return finish(snapshot, 'disk' if snapshot is not None else 'none')
 
-    base_url = _build_management_base_url()
-    url = f'{base_url}/v0/management/usage'
-    headers = _management_headers()
-    try:
-        resp = requests.get(url, headers=headers, timeout=5)
-        _observe_management_response(resp)
-        resp.raise_for_status()
-        snapshot = resp.json()
-        cache.set(cache_key, snapshot)
-        save_usage_snapshot(snapshot)
-        return snapshot
-    except Exception:
-        snapshot = load_usage_snapshot_from_disk()
-        if snapshot is not None:
-            cache.set(cache_key, snapshot)
-        return snapshot
+    # Serialize refreshes so several dashboard clients cannot fan out identical
+    # management requests while the upstream is slow or unavailable.
+    with usage_fetch_lock:
+        try:
+            base_url = _build_management_base_url()
+            headers = _management_headers()
+            if state.get('usage_api_kind') == 'queue':
+                supported, accepted = _fetch_usage_queue(base_url, headers)
+                if supported:
+                    cache.invalidate('usage_snapshot_failure')
+                    return finish({'queue_records': accepted}, 'queue')
+                state['usage_api_kind'] = 'unknown'
+
+            url = f'{base_url}/v0/management/usage'
+            with http_session.get(url, headers=headers, timeout=(2, 4), stream=True) as resp:
+                _observe_management_response(resp)
+                if resp.status_code in {404, 405}:
+                    snapshot = None
+                else:
+                    resp.raise_for_status()
+                    snapshot = _response_json_limited(resp, 32 * 1024 * 1024)
+            if snapshot is None:
+                supported, accepted = _fetch_usage_queue(base_url, headers)
+                if supported:
+                    state['usage_api_kind'] = 'queue'
+                    cache.invalidate('usage_snapshot_failure')
+                    envelope_data = {'queue_records': accepted}
+                    return finish(envelope_data, 'queue')
+                raise ValueError('No supported usage endpoint is available')
+            if not isinstance(snapshot, dict):
+                raise ValueError('Usage endpoint did not return a JSON object')
+            state['usage_api_kind'] = 'cumulative'
+            save_usage_snapshot(snapshot)
+            cache.invalidate('usage_snapshot_failure')
+            return finish(snapshot, 'live')
+        except Exception:
+            cache.set('usage_snapshot_failure', True)
+            snapshot = load_usage_snapshot_from_disk()
+            return finish(snapshot, 'disk' if snapshot is not None else 'none')
 
 
 def aggregate_usage_snapshot(snapshot):
     totals = {
         'input_tokens': 0,
         'output_tokens': 0,
+        'reasoning_tokens': 0,
         'cached_tokens': 0,
         'total_tokens': 0,
     }
@@ -800,7 +1344,7 @@ def aggregate_usage_snapshot(snapshot):
 
     def extract_tokens(obj):
         if not isinstance(obj, dict):
-            return 0, 0, 0, 0
+            return 0, 0, 0, 0, 0
         tokens = obj.get('tokens') or obj.get('usage') or obj
         input_tokens = _safe_int(tokens.get('input_tokens', tokens.get('input', tokens.get('prompt_tokens', 0))))
         output_tokens = _safe_int(tokens.get('output_tokens', tokens.get('output', tokens.get('completion_tokens', 0))))
@@ -809,7 +1353,11 @@ def aggregate_usage_snapshot(snapshot):
         total_tokens = _safe_int(tokens.get('total_tokens', tokens.get('total', obj.get('total_tokens', 0))))
         if total_tokens == 0:
             total_tokens = input_tokens + output_tokens + reasoning_tokens
-        return input_tokens, output_tokens, cached_tokens, total_tokens
+        # Some providers include reasoning inside output_tokens while others
+        # expose it in addition. Count only the portion proven to sit outside
+        # input+output so totals and output billing cannot double-count it.
+        reasoning_extra = max(0, min(reasoning_tokens, total_tokens - input_tokens - output_tokens))
+        return input_tokens, output_tokens, reasoning_extra, cached_tokens, total_tokens
 
     apis = usage.get('apis', [])
     if isinstance(apis, dict):
@@ -839,15 +1387,17 @@ def aggregate_usage_snapshot(snapshot):
             details = model.get('details')
             if isinstance(details, list) and details:
                 for detail in details:
-                    input_tokens, output_tokens, cached_tokens, total_tokens = extract_tokens(detail)
+                    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens = extract_tokens(detail)
                     totals['input_tokens'] += input_tokens
                     totals['output_tokens'] += output_tokens
+                    totals['reasoning_tokens'] += reasoning_tokens
                     totals['cached_tokens'] += cached_tokens
                     totals['total_tokens'] += total_tokens
             else:
-                input_tokens, output_tokens, cached_tokens, total_tokens = extract_tokens(model)
+                input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens = extract_tokens(model)
                 totals['input_tokens'] += input_tokens
                 totals['output_tokens'] += output_tokens
+                totals['reasoning_tokens'] += reasoning_tokens
                 totals['cached_tokens'] += cached_tokens
                 totals['total_tokens'] += total_tokens
 
@@ -864,6 +1414,16 @@ def aggregate_usage_snapshot(snapshot):
         reqs['success'] = sum_success
         reqs['failure'] = sum_failure
 
+    # Older/newer upstream builds may omit one side of the success/failure
+    # breakdown. Infer the missing side without ever exceeding the total.
+    reqs['total_requests'] = max(0, reqs['total_requests'])
+    reqs['success'] = max(0, min(reqs['success'], reqs['total_requests']))
+    reqs['failure'] = max(0, min(reqs['failure'], reqs['total_requests']))
+    if reqs['total_requests'] and reqs['success'] == 0 and reqs['failure'] > 0:
+        reqs['success'] = reqs['total_requests'] - reqs['failure']
+    elif reqs['total_requests'] and reqs['failure'] == 0 and reqs['success'] > 0:
+        reqs['failure'] = reqs['total_requests'] - reqs['success']
+
     return totals, reqs
 
 
@@ -876,7 +1436,7 @@ def compute_usage_costs(tokens, pricing):
     cached_tokens = _safe_int(tokens.get('cached_tokens', 0))
 
     input_cost = billable_input_tokens / PRICING_BASIS_TOKENS * input_price
-    output_tokens = _safe_int(tokens.get('output_tokens', 0))
+    output_tokens = _safe_int(tokens.get('output_tokens', 0)) + _safe_int(tokens.get('reasoning_tokens', 0))
     output_cost = output_tokens / PRICING_BASIS_TOKENS * output_price
     cache_cost = cached_tokens / PRICING_BASIS_TOKENS * cache_price
     total_cost = input_cost + output_cost + cache_cost
@@ -907,12 +1467,13 @@ def _parse_float_or_none(value):
     if value is None:
         return None
     try:
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
     except Exception:
         return None
 
 
-def _fetch_openrouter_models():
+def _fetch_openrouter_models(*, allow_network=True):
     """
     从 OpenRouter 获取模型列表（带长缓存）。
     OpenRouter pricing 字段为“美元/Token”，本面板内部价格口径为“美元/百万Tokens”。
@@ -921,12 +1482,16 @@ def _fetch_openrouter_models():
     cached = cache.get(cache_key, max_age=6 * 3600)
     if cached is not None:
         return cached
+    if cache.get('openrouter_models_error', max_age=300) is not None:
+        return []
+    if not allow_network:
+        return None
 
     url = 'https://openrouter.ai/api/v1/models'
     try:
-        resp = requests.get(url, timeout=15, headers={'User-Agent': 'CPA-X Panel'})
-        resp.raise_for_status()
-        payload = resp.json() if resp.content else {}
+        with http_session.get(url, timeout=8, stream=True) as resp:
+            resp.raise_for_status()
+            payload = _response_json_limited(resp, 16 * 1024 * 1024)
         models = payload.get('data', []) if isinstance(payload, dict) else []
         if not isinstance(models, list):
             models = []
@@ -934,15 +1499,17 @@ def _fetch_openrouter_models():
         return models
     except Exception as e:
         print(f'Warning: failed to fetch openrouter models: {e}')
-        cache.set(cache_key, [])
+        cache.set('openrouter_models_error', True)
         return []
 
 
-def _openrouter_pricing_per_million(model_id: str):
+def _openrouter_pricing_per_million(model_id: str, *, allow_network=True):
     if not model_id:
         return None
 
-    models = _fetch_openrouter_models()
+    models = _fetch_openrouter_models(allow_network=allow_network)
+    if models is None:
+        return None
     for m in models:
         if not isinstance(m, dict):
             continue
@@ -994,7 +1561,7 @@ def _pick_pricing_auto_model_id():
     return 'openai/gpt-4o-mini'
 
 
-def get_effective_pricing():
+def get_effective_pricing(*, allow_remote=True):
     """
     返回本次用于展示/计算的价格（USD / 1M tokens）。
     规则：
@@ -1029,12 +1596,14 @@ def get_effective_pricing():
         return manual, meta
 
     model_id = _pick_pricing_auto_model_id()
-    suggested = _openrouter_pricing_per_million(model_id)
+    suggested = _openrouter_pricing_per_million(model_id, allow_network=allow_remote)
     if not suggested:
         # 如果 config.yaml 挑的模型在 OpenRouter 找不到，尝试回退到固定模型
         if model_id != 'openai/gpt-4o-mini':
-            suggested = _openrouter_pricing_per_million('openai/gpt-4o-mini')
+            suggested = _openrouter_pricing_per_million('openai/gpt-4o-mini', allow_network=allow_remote)
     if not suggested:
+        if not allow_remote:
+            meta['pending'] = True
         return manual, meta
 
     eff = dict(manual)
@@ -1061,13 +1630,13 @@ def import_usage_snapshot(snapshot):
         return False
     if _management_auth_locked():
         return False
-    base_url = _build_management_base_url()
-    url = f'{base_url}/v0/management/usage/import'
-    headers = _management_headers()
     try:
-        resp = requests.post(url, headers=headers, json=snapshot, timeout=8)
-        _observe_management_response(resp)
-        resp.raise_for_status()
+        base_url = _build_management_base_url()
+        url = f'{base_url}/v0/management/usage/import'
+        headers = _management_headers()
+        with http_session.post(url, headers=headers, json=snapshot, timeout=8) as resp:
+            _observe_management_response(resp)
+            resp.raise_for_status()
         return True
     except Exception as e:
         print(f"Warning: usage import failed: {e}")
@@ -1075,15 +1644,19 @@ def import_usage_snapshot(snapshot):
 
 
 def _usage_snapshot_worker():
-    snapshot = load_usage_snapshot_from_disk()
-    if snapshot:
-        import_usage_snapshot(snapshot)
+    # Disk snapshots are display fallbacks only. Re-importing them on every panel
+    # restart can duplicate upstream counters depending on CLIProxyAPI version.
     while True:
+        delay = 60
         try:
-            fetch_usage_snapshot(use_cache=False)
+            _, meta = fetch_usage_snapshot(use_cache=False, with_meta=True)
+            # v7 queue items expire after 60 seconds by default, so poll well
+            # inside that window. Cumulative v6 snapshots remain low-frequency.
+            if meta.get('source') == 'queue':
+                delay = 15
         except Exception:
             pass
-        time.sleep(60)
+        time.sleep(delay)
 
 
 def start_usage_snapshot_worker():
@@ -1102,6 +1675,9 @@ def _read_file_first_line(path):
 
 
 def get_system_info():
+    cached = cache.get('system_info', max_age=3600)
+    if cached is not None:
+        return cached
     info = {
         'cpu_model': None,
         'os_version': None,
@@ -1134,13 +1710,17 @@ def get_system_info():
     info['cpu_model'] = info['cpu_model'] or platform.processor() or 'unknown'
     info['os_version'] = info['os_version'] or platform.platform()
     info['cloud_vendor'] = info['cloud_vendor'] or 'unknown'
+    cache.set('system_info', info)
     return info
 
 
 def get_cliproxy_process_usage():
     if not HAS_PSUTIL:
         return {'cpu_percent': 0.0, 'memory_bytes': 0, 'memory_percent': 0.0}
-    target = CONFIG.get('cliproxy_service', 'cliproxy')
+    monitor = globals().get('resource_monitor')
+    if monitor is not None:
+        return monitor.get_cliproxy_usage()
+    target = str(CONFIG.get('cliproxy_service', 'cliproxy') or 'cliproxy').lower()
     cpu_percent = 0.0
     memory_bytes = 0
     memory_percent = 0.0
@@ -1168,70 +1748,76 @@ def get_cliproxy_process_usage():
 
 
 def _normalize_quote_text(text):
-    if not text:
-        return text
-    has_en = any('A' <= ch <= 'Z' or 'a' <= ch <= 'z' for ch in text)
-    has_cn = any('\u4e00' <= ch <= '\u9fff' for ch in text)
-    if has_en and has_cn and '（' in text and '）' in text:
-        prefix, rest = text.split('（', 1)
-        inside, suffix = rest.split('）', 1)
-        prefix = prefix.strip()
-        inside = inside.strip()
-        if prefix and inside:
-            prefix_has_en = any('A' <= ch <= 'Z' or 'a' <= ch <= 'z' for ch in prefix)
-            inside_has_en = any('A' <= ch <= 'Z' or 'a' <= ch <= 'z' for ch in inside)
-            if not prefix_has_en and inside_has_en:
-                return f"{inside}（{prefix}）{suffix}".strip()
-    return text.strip()
+    # Preserve the supplied wording and punctuation. Earlier versions reordered
+    # Chinese/English parentheticals, which silently changed the quote itself.
+    return str(text or '').strip()
+
+
+def _parse_quote_line(raw_line):
+    line = str(raw_line or '').strip().lstrip('\ufeff')
+    if not line:
+        return None
+
+    if '出自：' in line:
+        quote, author = line.rsplit('出自：', 1)
+        quote = re.sub(r'(?:出自：\s*)+$', '', quote).strip()
+        author = author.strip()
+    else:
+        # The provided X.txt contains a few legacy lines without the marker but
+        # with a bilingual author suffix, e.g. “……。特朗普/Donald Trump（…）”.
+        author_match = re.search(
+            r'(?P<author>[\u4e00-\u9fff·]{2,}\s*/\s*[A-Za-z][A-Za-z .\'-]*(?:（[^）]+）)?)\s*$',
+            line,
+        )
+        if author_match:
+            quote = line[:author_match.start()].strip()
+            author = author_match.group('author').strip()
+        else:
+            quote = line
+            author = '未标注出处'
+
+    quote = _normalize_quote_text(quote)
+    if not quote or not author:
+        return None
+    return {'text': quote, 'author': author}
 
 
 def load_quotes():
-    path = _resolve_panel_path(CONFIG.get('quotes_path'))
-    if not path or not os.path.exists(path):
-        fallback_path = os.path.join(BASE_DIR, 'X.txt')
-        if not os.path.exists(fallback_path):
-            return []
-        path = fallback_path
+    configured_path = _resolve_panel_path(CONFIG.get('quotes_path'))
+    # X.txt supplied with the project is always loaded. A configured path can
+    # add quotes, but can no longer accidentally replace the required library.
+    candidate_paths = [BUNDLED_QUOTES_PATH]
+    if configured_path and os.path.normcase(os.path.realpath(configured_path)) != os.path.normcase(os.path.realpath(BUNDLED_QUOTES_PATH)):
+        candidate_paths.append(configured_path)
+
     quotes = []
     seen = set()
-    try:
-        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-        content = content.replace('\r\n', '\n').replace('\r', '\n')
-        markers = list(re.finditer('出自：', content))
-        if not markers:
-            return []
-        last_end = 0
-        for idx, marker in enumerate(markers):
-            quote = content[last_end:marker.start()].strip()
-            next_marker_pos = markers[idx + 1].start() if idx + 1 < len(markers) else len(content)
-            author_block = content[marker.end():next_marker_pos]
-            author_line = author_block.split('\n', 1)[0].strip()
-            if len(author_line) > 80:
-                cut_positions = [author_line.find(p) for p in ['。', '！', '？', '!', '?', '；', ';']]
-                cut_positions = [p for p in cut_positions if p != -1]
-                if cut_positions:
-                    author_line = author_line[:min(cut_positions)].strip()
-            quote = _normalize_quote_text(quote)
-            if quote and author_line:
-                key = f"{quote}||{author_line}"
-                if key not in seen:
+    for path in candidate_paths:
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, 'r', encoding='utf-8-sig', errors='replace') as handle:
+                for raw_line in handle:
+                    item = _parse_quote_line(raw_line)
+                    if not item:
+                        continue
+                    key = (item['text'], item['author'])
+                    if key in seen:
+                        continue
                     seen.add(key)
-                    quotes.append({'text': quote, 'author': author_line})
-            last_end = marker.end() + len(author_line)
-    except Exception as e:
-        print(f"Warning: failed to load quotes: {e}")
+                    quotes.append(item)
+        except Exception as e:
+            print(f"Warning: failed to load quotes from {path}: {e}")
     return quotes
 
 
 def get_random_quote():
-    cached = cache.get('quotes_cache', max_age=30)
+    cached = cache.get('quotes_cache', max_age=300)
     if cached is None:
         cached = load_quotes()
         cache.set('quotes_cache', cached)
     if not cached:
         return {'text': '欢迎回来，祝你今天高效完成任务。', 'author': '系统'}
-    import random
     return random.choice(cached)
 
 cache = CacheManager()
@@ -1241,6 +1827,8 @@ class ResourceMonitor:
     """非阻塞资源监控器"""
     def __init__(self):
         self._cpu_percent = 0.0
+        self._cliproxy_usage = {'cpu_percent': 0.0, 'memory_bytes': 0, 'memory_percent': 0.0, 'pid': None}
+        self._cliproxy_process = None
         self._lock = threading.Lock()
         self._running = False
 
@@ -1258,23 +1846,77 @@ class ResourceMonitor:
             try:
                 if HAS_PSUTIL:
                     cpu = psutil.cpu_percent(interval=1)  # 1秒采样
+                    process_usage = self._sample_cliproxy_process()
                     with self._lock:
                         self._cpu_percent = cpu
-            except:
-                pass
+                        self._cliproxy_usage = process_usage
+            except Exception as e:
+                print(f'Warning: resource monitor sample failed: {e}')
             time.sleep(2)  # 每3秒更新一次(1秒采样+2秒等待)
+
+    def _sample_cliproxy_process(self):
+        empty = {'cpu_percent': 0.0, 'memory_bytes': 0, 'memory_percent': 0.0, 'pid': None}
+        if not HAS_PSUTIL:
+            return empty
+        target = str(CONFIG.get('cliproxy_service', 'cliproxy') or 'cliproxy').lower()
+        proc = self._cliproxy_process
+        try:
+            if proc is not None and not proc.is_running():
+                proc = None
+        except (psutil.Error, OSError):
+            proc = None
+
+        if proc is None:
+            try:
+                for candidate in psutil.process_iter(['name', 'cmdline']):
+                    name = str(candidate.info.get('name') or '').lower()
+                    cmdline = ' '.join(candidate.info.get('cmdline') or []).lower()
+                    if target in name or target in cmdline or 'cli-proxy-api' in name or 'cliproxyapi' in name:
+                        proc = candidate
+                        proc.cpu_percent(interval=None)
+                        break
+            except (psutil.Error, OSError):
+                proc = None
+            self._cliproxy_process = proc
+
+        if proc is None:
+            return empty
+        try:
+            memory = proc.memory_info()
+            return {
+                'cpu_percent': round(max(0.0, proc.cpu_percent(interval=None)), 1),
+                'memory_bytes': max(0, int(memory.rss)),
+                'memory_percent': round(max(0.0, proc.memory_percent()), 2),
+                'pid': proc.pid,
+            }
+        except (psutil.Error, OSError):
+            self._cliproxy_process = None
+            return empty
 
     def get_cpu_percent(self):
         """获取CPU使用率（非阻塞）"""
         with self._lock:
             return self._cpu_percent
 
+    def get_cliproxy_usage(self):
+        with self._lock:
+            return dict(self._cliproxy_usage)
+
 resource_monitor = ResourceMonitor()
 
-def run_cmd(cmd, timeout=60):
+def run_cmd(args, timeout=60, cwd=None):
+    """Run a command without a shell so environment-supplied paths stay data."""
     try:
+        if isinstance(args, (str, bytes)):
+            raise TypeError('run_cmd requires an argument sequence, not a shell command string')
         result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=timeout
+            [os.fspath(arg) for arg in args],
+            cwd=os.fspath(cwd) if cwd else None,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
         return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
@@ -1291,9 +1933,28 @@ def command_available(command):
     return shutil.which(command) is not None
 
 
-def cleanup_binary_backups(binary_path, keep=BACKUP_RETENTION_COUNT):
-    if not binary_path or keep < 1:
+def _systemd_service_name(value=None):
+    name = str(value if value is not None else CONFIG.get('cliproxy_service') or '').strip()
+    if (
+        not name
+        or len(name) > 255
+        or name.startswith('-')
+        or not re.fullmatch(r'(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2})+', name)
+    ):
+        return ''
+    return name
+
+
+def cleanup_binary_backups(binary_path, keep=None, max_total_bytes=None, max_age_seconds=None):
+    if not binary_path:
         return []
+    if keep is None:
+        keep = CONFIG.get('backup_retention_count', BACKUP_RETENTION_COUNT)
+    keep = max(1, _safe_int(keep, BACKUP_RETENTION_COUNT))
+    if max_total_bytes is None:
+        max_total_bytes = max(0, _safe_int(CONFIG.get('backup_max_total_mb', 512), 512)) * 1024 * 1024
+    if max_age_seconds is None:
+        max_age_seconds = max(0, _safe_int(CONFIG.get('backup_max_age_days', 14), 14)) * 86400
     backup_dir = os.path.dirname(os.path.abspath(binary_path))
     binary_name = os.path.basename(binary_path)
     if not backup_dir or not binary_name or not os.path.isdir(backup_dir):
@@ -1303,26 +1964,72 @@ def cleanup_binary_backups(binary_path, keep=BACKUP_RETENTION_COUNT):
     prefix = f'{binary_name}.bak.'
     try:
         for entry in os.scandir(backup_dir):
-            if not entry.is_file():
+            if not entry.is_file(follow_symlinks=False):
                 continue
             if not entry.name.startswith(prefix):
                 continue
-            if not BACKUP_TS_PATTERN.search(entry.name):
+            timestamp_match = BACKUP_TS_PATTERN.search(entry.name)
+            if not timestamp_match:
                 continue
-            backups.append((entry.stat().st_mtime, entry.path))
+            stat_result = entry.stat(follow_symlinks=False)
+            timestamp_text = timestamp_match.group(1)
+            is_utc_format = timestamp_text.count('-') == 2
+            timestamp_format = '%Y%m%d-%H%M%S-%f' if is_utc_format else '%Y%m%d-%H%M%S'
+            try:
+                parsed_timestamp = datetime.strptime(timestamp_text, timestamp_format)
+                # v2.2 microsecond names are UTC. Legacy second-only names were
+                # generated with datetime.now(), so interpret them in the host's
+                # historical local timezone (including DST).
+                created_at = (
+                    parsed_timestamp.replace(tzinfo=UTC).timestamp()
+                    if is_utc_format
+                    else parsed_timestamp.astimezone(UTC).timestamp()
+                )
+            except ValueError:
+                created_at = stat_result.st_mtime
+            backups.append({
+                'mtime': stat_result.st_mtime,
+                'created_at': created_at,
+                'size': max(0, stat_result.st_size),
+                'path': entry.path,
+            })
     except Exception as e:
         print(f"Warning: failed to scan binary backups: {e}")
         return []
 
-    backups.sort(key=lambda item: item[0], reverse=True)
+    backups.sort(key=lambda item: item['created_at'], reverse=True)
     deleted = []
-    for _, path in backups[keep:]:
+    kept_size = 0
+    now = time.time()
+    for index, backup in enumerate(backups):
+        too_many = index >= keep
+        too_old = bool(max_age_seconds and now - backup['created_at'] > max_age_seconds)
+        too_large = bool(max_total_bytes and kept_size + backup['size'] > max_total_bytes)
+        # Always retain the newest valid rollback point even if it exceeds a size/age cap.
+        should_delete = index > 0 and (too_many or too_old or too_large)
+        if not should_delete:
+            kept_size += backup['size']
+            continue
         try:
-            os.remove(path)
-            deleted.append(path)
+            os.remove(backup['path'])
+            deleted.append(backup['path'])
         except Exception as e:
-            print(f"Warning: failed to remove old backup {path}: {e}")
+            print(f"Warning: failed to remove old backup {backup['path']}: {e}")
     return deleted
+
+
+def create_binary_backup(binary_path):
+    if not binary_path or not os.path.isfile(binary_path):
+        return None
+    timestamp = _utc_now().strftime('%Y%m%d-%H%M%S-%f')
+    backup_path = f'{binary_path}.bak.{timestamp}'
+    try:
+        # A hard link avoids a temporary second copy before os.replace swaps in
+        # the new binary. Fall back to copy when the filesystem disallows links.
+        os.link(binary_path, backup_path)
+    except OSError:
+        shutil.copy2(binary_path, backup_path)
+    return backup_path
 
 
 def get_service_status(use_cache=True):
@@ -1338,22 +2045,27 @@ def get_service_status(use_cache=True):
     is_running = False
 
     if is_linux() and command_available('systemctl'):
-        service_name = CONFIG.get("cliproxy_service")
-        success, stdout, _ = run_cmd(f'systemctl is-active {service_name}')
-        is_running = success and stdout == 'active'
-        _, status_out, _ = run_cmd(f'systemctl status {service_name} --no-pager -l 2>/dev/null | head -20')
-        # 尽量用 systemd 的 MainPID（比 pgrep 更准确，且不依赖进程名）
-        ok_pid, pid_value, _ = run_cmd(f'systemctl show {service_name} -p MainPID --value 2>/dev/null')
-        if ok_pid:
-            pid_value = (pid_value or '').strip()
-            if pid_value and pid_value != '0':
-                pid_out = pid_value
+        service_name = _systemd_service_name()
+        if service_name:
+            success, stdout, _ = run_cmd(['systemctl', 'is-active', service_name])
+            is_running = success and stdout == 'active'
+            _, full_status, _ = run_cmd(['systemctl', 'status', service_name, '--no-pager', '-l'])
+            status_out = '\n'.join(full_status.splitlines()[:20])
+            # 尽量用 systemd 的 MainPID（比 pgrep 更准确，且不依赖进程名）
+            ok_pid, pid_value, _ = run_cmd(['systemctl', 'show', service_name, '-p', 'MainPID', '--value'])
+            if ok_pid:
+                pid_value = (pid_value or '').strip()
+                if pid_value and pid_value != '0':
+                    pid_out = pid_value
+        else:
+            status_out = 'Invalid or missing systemd service name'
     else:
         status_out = 'Not supported on this platform'
 
     # fallback：没有 systemd 或无法获取 MainPID 时再尝试 pgrep
     if not pid_out and command_available('pgrep'):
-        _, pid_out, _ = run_cmd('pgrep -f "cli-proxy-api|cliproxyapi|cliproxy" | head -1')
+        _, all_pids, _ = run_cmd(['pgrep', '-f', 'cli-proxy-api|cliproxyapi|cliproxy'])
+        pid_out = next((line.strip() for line in all_pids.splitlines() if line.strip()), '')
 
     memory = 'N/A'
     cpu = 'N/A'
@@ -1364,18 +2076,18 @@ def get_service_status(use_cache=True):
             try:
                 proc = psutil.Process(int(pid_out))
                 memory = f'{proc.memory_info().rss / 1024 / 1024:.1f} MB'
-                # 使用后台监控的CPU数据，避免阻塞
-                cpu = f'{resource_monitor.get_cpu_percent():.1f}%'
+                # 使用后台进程采样，避免把整机 CPU 错标成 CLIProxy CPU。
+                cpu = f'{get_cliproxy_process_usage().get("cpu_percent", 0.0):.1f}%'
                 uptime_seconds = time.time() - proc.create_time()
                 uptime = format_uptime(uptime_seconds)
-            except:
+            except (ValueError, psutil.Error, OSError):
                 pass
         elif command_available('ps'):
-            _, mem_out, _ = run_cmd(f'ps -o rss= -p {pid_out}')
+            _, mem_out, _ = run_cmd(['ps', '-o', 'rss=', '-p', str(pid_out)])
             if mem_out:
                 try:
                     memory = f'{int(mem_out) / 1024:.1f} MB'
-                except:
+                except (TypeError, ValueError):
                     pass
 
     result = {
@@ -1406,12 +2118,13 @@ def format_uptime(seconds):
         return f'{days}天{hours}小时'
 
 
-def get_github_release_version():
+def get_github_release_version(use_cache=True):
     """从GitHub releases获取最新版本号（带缓存）"""
     cache_key = 'github_release'
-    cached = cache.get(cache_key, max_age=300)
-    if cached:
-        return cached
+    if use_cache:
+        cached = cache.get(cache_key, max_age=300)
+        if cached is not None:
+            return cached
 
     try:
         repo = 'router-for-me/CLIProxyAPI'
@@ -1430,34 +2143,38 @@ def get_github_release_version():
 
         # 1) 优先用 GitHub API（有 token 时限额更高）
         try:
-            resp = requests.get(api_url, headers=api_headers(), timeout=10)
-            if resp.status_code == 200:
-                data = resp.json() if resp.content else {}
-                version = (data.get('tag_name') if isinstance(data, dict) else None) or 'unknown'
-                cache.set(cache_key, version)
-                return version
+            with http_session.get(api_url, headers=api_headers(), timeout=8, stream=True) as resp:
+                if resp.status_code == 200:
+                    data = _response_json_limited(resp, 2 * 1024 * 1024)
+                    version = (data.get('tag_name') if isinstance(data, dict) else None) or 'unknown'
+                    cache.set(cache_key, version)
+                    return version
         except Exception as e:
             print(f'get_github_release_version api error: {e}')
 
         # 2) 回退：解析 /releases/latest 的 302 跳转（不依赖 GitHub API，避免 rate limit）
         try:
-            resp = requests.get(
+            resp = http_session.get(
                 html_latest_url,
                 headers={'User-Agent': 'CLIProxyPanel'},
                 timeout=10,
                 allow_redirects=False,
+                stream=True,
             )
             location = resp.headers.get('Location', '')
+            resp.close()
             m = re.search(r'/tag/(v[^/?#]+)', location)
             if not m:
                 # 极端情况下不返回 302，则跟随跳转后从最终 URL 解析
-                resp2 = requests.get(
+                resp2 = http_session.get(
                     html_latest_url,
                     headers={'User-Agent': 'CLIProxyPanel'},
                     timeout=10,
                     allow_redirects=True,
+                    stream=True,
                 )
                 m = re.search(r'/tag/(v[^/?#]+)', str(getattr(resp2, 'url', '') or ''))
+                resp2.close()
             if m:
                 version = m.group(1)
                 cache.set(cache_key, version)
@@ -1466,8 +2183,10 @@ def get_github_release_version():
             print(f'get_github_release_version fallback error: {e}')
     except Exception as e:
         print(f'get_github_release_version error: {e}')
+        cache.set(cache_key, 'unknown')
         return 'unknown'
 
+    cache.set(cache_key, 'unknown')
     return 'unknown'
 
 
@@ -1494,20 +2213,42 @@ def _decorate_version_tag(version):
     if raw.lower() in {'unknown', 'dev'}:
         return raw.lower()
     normalized = _normalize_release_version(raw)
-    # 只对形如 1.2.3 这样的做装饰
-    if re.match(r'^\d+(\.\d+){1,3}$', normalized):
+    # 只对语义版本样式做装饰，保留预发布/构建信息。
+    if VERSION_PATTERN.match(normalized):
         return f'v{normalized}'
     return raw
+
+
+def _release_version_key(version):
+    raw = str(version or '').strip()
+    match = VERSION_PATTERN.match(raw)
+    if not match:
+        return None
+    release = tuple(int(part) for part in match.group('release').split('.'))
+    release = release + (0,) * (4 - len(release))
+    suffix = match.group('suffix') or ''
+    prerelease = ''
+    if suffix.startswith('-'):
+        prerelease = suffix[1:].split('+', 1)[0]
+    # A final release sorts after a prerelease of the same numeric version.
+    stability = 1 if not prerelease else 0
+    identifiers = []
+    for identifier in prerelease.lower().split('.') if prerelease else []:
+        if identifier.isdigit():
+            identifiers.append((0, int(identifier)))
+        else:
+            identifiers.append((1, identifier))
+    return release, stability, tuple(identifiers)
 
 
 def _cliproxy_management_get(path, timeout=6):
     if _management_auth_locked():
         return None
-    base_url = _build_management_base_url()
-    url = f'{base_url}{path}'
-    headers = _management_headers()
     try:
-        resp = requests.get(url, headers=headers, timeout=timeout)
+        base_url = _build_management_base_url()
+        url = f'{base_url}{path}'
+        headers = _management_headers()
+        resp = http_session.get(url, headers=headers, timeout=timeout, stream=True)
         _observe_management_response(resp)
         return resp
     except Exception:
@@ -1539,6 +2280,8 @@ def _get_local_version_from_management():
             return version
     except Exception:
         return None
+    finally:
+        resp.close()
     return None
 
 
@@ -1554,7 +2297,7 @@ def _is_semver_like(version) -> bool:
     normalized = _normalize_release_version(version)
     if not normalized or normalized in {'unknown', 'dev'}:
         return False
-    return bool(re.match(r'^\d+(\.\d+){1,3}$', str(normalized)))
+    return bool(VERSION_PATTERN.match(str(normalized)))
 
 
 def _get_last_successful_release_version_from_history():
@@ -1563,8 +2306,7 @@ def _get_last_successful_release_version_from_history():
         path = UPDATE_HISTORY_PATH
         if not path or not os.path.exists(path):
             return None
-        with open(path, 'r', encoding='utf-8') as f:
-            history = json.load(f)
+        history = _load_json_file_limited(path, 1024 * 1024)
         if not isinstance(history, list):
             return None
         for entry in reversed(history):
@@ -1583,8 +2325,8 @@ def _get_last_successful_release_version_from_history():
 def get_local_version():
     """获取本地版本号"""
     cache_key = 'local_version'
-    cached = cache.get(cache_key, max_age=30)
-    if cached:
+    cached = cache.get(cache_key, max_age=300)
+    if cached is not None:
         return cached
 
     mgmt_candidate = None
@@ -1599,11 +2341,8 @@ def get_local_version():
         mgmt_candidate = mgmt_version
 
     # 2) 其次：本地 git 仓库
-    cliproxy_dir = CONFIG.get('cliproxy_dir')
+    cliproxy_dir = _resolve_panel_path(CONFIG.get('cliproxy_dir'))
     if _is_git_repo(cliproxy_dir) and command_available('git'):
-        # 确保本地有最新的 tag 信息
-        run_cmd(f'cd {cliproxy_dir} && git fetch --tags 2>/dev/null', timeout=10)
-
         version_file = os.path.join(cliproxy_dir, 'VERSION')
         if os.path.exists(version_file):
             try:
@@ -1616,13 +2355,13 @@ def get_local_version():
             except Exception:
                 pass
 
-        ok, stdout, _ = run_cmd(f'cd {cliproxy_dir} && git describe --tags --abbrev=0 2>/dev/null')
+        ok, stdout, _ = run_cmd(['git', 'describe', '--tags', '--abbrev=0'], cwd=cliproxy_dir)
         if ok and stdout and _is_semver_like(stdout):
             decorated = _decorate_version_tag(stdout)
             cache.set(cache_key, decorated)
             return decorated
 
-        ok, stdout, _ = run_cmd(f'cd {cliproxy_dir} && git rev-parse --short HEAD 2>/dev/null')
+        ok, stdout, _ = run_cmd(['git', 'rev-parse', '--short', 'HEAD'], cwd=cliproxy_dir)
         if ok and stdout:
             mgmt_candidate = mgmt_candidate or stdout
 
@@ -1640,23 +2379,55 @@ def get_local_version():
     cache.set(cache_key, 'unknown')
     return 'unknown'
 
-def _reset_log_stats_state():
+def _stat_file_identity(stat_result):
+    return f'{getattr(stat_result, "st_dev", 0)}:{getattr(stat_result, "st_ino", 0)}'
+
+
+def _new_log_stats_state(*, start_at_end=False):
+    log_file = _resolve_panel_path(CONFIG.get('cliproxy_log'))
+    initialized = False
+    offset = 0
+    last_size = 0
+    last_mtime = None
+    file_identity = None
+    if start_at_end and log_file:
+        try:
+            stat_result = os.stat(log_file)
+            initialized = True
+            offset = stat_result.st_size
+            last_size = stat_result.st_size
+            last_mtime = stat_result.st_mtime
+            file_identity = _stat_file_identity(stat_result)
+        except OSError:
+            pass
+    return {
+        'initialized': initialized,
+        'offset': offset,
+        'last_size': last_size,
+        'last_mtime': last_mtime,
+        'file_identity': file_identity,
+        'total': 0,
+        'success': 0,
+        'failed': 0,
+        'last_time': None,
+        'latest_log_time': None,
+        'timezone_offset_seconds': None,
+        'timezone_source': 'unknown',
+        'partial': False,
+        'skipped_bytes': 0,
+        'buffer': '',
+        'base_total': 0,
+        'base_success': 0,
+        'base_failed': 0,
+        'last_saved_ts': 0,
+    }
+
+
+def _reset_log_stats_state(*, start_at_end=False):
     with log_stats_lock:
-        state['log_stats'] = {
-            'initialized': False,
-            'offset': 0,
-            'last_size': 0,
-            'last_mtime': None,
-            'total': 0,
-            'success': 0,
-            'failed': 0,
-            'last_time': None,
-            'buffer': '',
-            'base_total': 0,
-            'base_success': 0,
-            'base_failed': 0,
-            'last_saved_ts': 0
-        }
+        state['log_stats'] = _new_log_stats_state(start_at_end=start_at_end)
+        state['log_stats_loaded'] = True
+    cache.invalidate('request_count_logs')
     save_log_stats_state(force=True)
 
 
@@ -1688,31 +2459,48 @@ def get_request_count_from_logs():
     """从日志获取请求统计（增量解析）"""
     cache_key = 'request_count_logs'
     cached = cache.get(cache_key, max_age=2)
-    if cached:
+    if cached is not None:
         return cached
 
     if not state.get('log_stats_loaded'):
         load_log_stats_state()
 
-    log_file = CONFIG['cliproxy_log']
+    log_file = _resolve_panel_path(CONFIG.get('cliproxy_log'))
     if not os.path.exists(log_file):
         with log_stats_lock:
             log_state = state.get('log_stats', {})
             result = {
-                'count': _safe_int(log_state.get('base_total', 0)),
-                'last_time': log_state.get('last_time'),
-                'success': _safe_int(log_state.get('base_success', 0)),
-                'failed': _safe_int(log_state.get('base_failed', 0))
+                'count': _safe_int(log_state.get('base_total', 0)) + _safe_int(log_state.get('total', 0)),
+                'last_time': _log_time_iso(log_state.get('last_time'), log_state.get('timezone_offset_seconds')),
+                'last_time_raw': log_state.get('last_time'),
+                'success': _safe_int(log_state.get('base_success', 0)) + _safe_int(log_state.get('success', 0)),
+                'failed': _safe_int(log_state.get('base_failed', 0)) + _safe_int(log_state.get('failed', 0)),
+                'log_available': False,
+                'partial': bool(log_state.get('partial', False)),
+                'skipped_bytes': _safe_int(log_state.get('skipped_bytes', 0)),
+                'timezone': {
+                    'configured': str(CONFIG.get('log_timezone', 'auto')),
+                    'source': log_state.get('timezone_source', 'unknown'),
+                    'offset_seconds': log_state.get('timezone_offset_seconds'),
+                },
             }
         cache.set(cache_key, result)
         return result
 
     try:
-        stat = os.stat(log_file)
-        file_size = stat.st_size
-        mtime = stat.st_mtime
-    except Exception:
-        result = {'count': 0, 'last_time': None, 'success': 0, 'failed': 0}
+        stat_result = os.stat(log_file)
+        file_size = stat_result.st_size
+        mtime = stat_result.st_mtime
+        file_identity = _stat_file_identity(stat_result)
+    except OSError:
+        result = {
+            'count': 0,
+            'last_time': None,
+            'last_time_raw': None,
+            'success': 0,
+            'failed': 0,
+            'log_available': False,
+        }
         cache.set(cache_key, result)
         return result
 
@@ -1722,12 +2510,15 @@ def get_request_count_from_logs():
         initialized = log_state.get('initialized')
         last_size = log_state.get('last_size', 0)
         last_mtime = log_state.get('last_mtime')
-        offset = log_state.get('offset', 0)
+        offset = max(0, _safe_int(log_state.get('offset', 0)))
+        previous_identity = log_state.get('file_identity')
 
         rotated = False
         if not initialized:
             rotated = True
-        elif file_size < last_size:
+        elif previous_identity and previous_identity != file_identity:
+            rotated = True
+        elif file_size < offset or file_size < last_size:
             rotated = True
         elif last_mtime and mtime < last_mtime:
             rotated = True
@@ -1743,63 +2534,117 @@ def get_request_count_from_logs():
             log_state['success'] = 0
             log_state['failed'] = 0
             log_state['last_time'] = None
+            log_state['latest_log_time'] = None
+            log_state['partial'] = False
+            log_state['skipped_bytes'] = 0
+            initial_scan_limit = max(1, _safe_int(CONFIG.get('log_initial_scan_max_mb', 64), 64)) * 1024 * 1024
+            if file_size > initial_scan_limit:
+                offset = file_size - initial_scan_limit
+                log_state['partial'] = True
+                log_state['skipped_bytes'] = offset
         changed = rotated
 
         try:
-            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(log_file, 'rb') as f:
                 if offset:
                     f.seek(offset)
-                new_data = f.read()
+                    if log_state.get('partial') and offset == log_state.get('skipped_bytes'):
+                        # The bounded first scan may begin in the middle of a line.
+                        f.readline()
                 new_offset = f.tell()
-        except Exception:
-            result = {'count': 0, 'last_time': None, 'success': 0, 'failed': 0}
+                while True:
+                    line_start = f.tell()
+                    raw_line = f.readline()
+                    if not raw_line:
+                        break
+                    # Leave an incomplete trailing line for the next pass.
+                    if not raw_line.endswith(b'\n'):
+                        new_offset = line_start
+                        break
+                    new_offset = f.tell()
+                    line = raw_line.decode('utf-8', errors='replace')
+                    time_match = LOG_TIME_PATTERN.search(line)
+                    if time_match:
+                        log_state['latest_log_time'] = time_match.group(1)
+
+                    if '[gin_logger.go:' not in line or not REQUEST_METHOD_PATTERN.search(line):
+                        continue
+                    if any(path in line for path in EXCLUDED_LOG_PATHS):
+                        continue
+                    log_state['total'] += 1
+                    if time_match:
+                        log_state['last_time'] = time_match.group(1)
+                    status_match = REQUEST_STATUS_PATTERN.search(line)
+                    if status_match:
+                        code = int(status_match.group(1))
+                        if 200 <= code < 400:
+                            log_state['success'] += 1
+                        elif code >= 400:
+                            log_state['failed'] += 1
+                    changed = True
+        except (OSError, ValueError):
+            result = {
+                'count': _safe_int(log_state.get('base_total', 0)) + _safe_int(log_state.get('total', 0)),
+                'last_time': _log_time_iso(log_state.get('last_time'), log_state.get('timezone_offset_seconds')),
+                'last_time_raw': log_state.get('last_time'),
+                'success': _safe_int(log_state.get('base_success', 0)) + _safe_int(log_state.get('success', 0)),
+                'failed': _safe_int(log_state.get('base_failed', 0)) + _safe_int(log_state.get('failed', 0)),
+                # An existing path is not enough: permission/I/O failures mean
+                # activity cannot be observed reliably, so automatic updates
+                # must stay on the safe side and wait.
+                'log_available': False,
+                'partial': bool(log_state.get('partial', False)),
+                'skipped_bytes': _safe_int(log_state.get('skipped_bytes', 0)),
+                'timezone': {
+                    'configured': str(CONFIG.get('log_timezone', 'auto')),
+                    'source': log_state.get('timezone_source', 'unknown'),
+                    'offset_seconds': log_state.get('timezone_offset_seconds'),
+                },
+            }
             cache.set(cache_key, result)
             return result
 
-        buffer = log_state.get('buffer', '') + new_data
-        lines = buffer.splitlines(keepends=True)
-        if lines and not lines[-1].endswith('\n'):
-            log_state['buffer'] = lines[-1]
-            lines = lines[:-1]
+        configured_tz, configured_source = _log_timezone(log_state.get('timezone_offset_seconds'))
+        if str(CONFIG.get('log_timezone', 'auto')).strip().lower() == 'auto':
+            inferred_offset = _infer_timezone_offset_seconds(log_state.get('latest_log_time'), mtime)
+            if inferred_offset is not None:
+                log_state['timezone_offset_seconds'] = inferred_offset
+                configured_source = 'auto-inferred'
         else:
-            log_state['buffer'] = ''
-
-        for line in lines:
-            if '[gin_logger.go' in line and ('POST' in line or 'GET' in line):
-                if any(path in line for path in EXCLUDED_LOG_PATHS):
-                    continue
-                log_state['total'] += 1
-                match = re.search(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]', line)
-                if match:
-                    log_state['last_time'] = match.group(1)
-                status_match = re.search(r'\s(\d{3})\s', line)
-                if status_match:
-                    code = int(status_match.group(1))
-                    if 200 <= code < 300:
-                        log_state['success'] += 1
-                    elif code >= 400:
-                        log_state['failed'] += 1
-                changed = True
+            utc_offset = _utc_now().astimezone(configured_tz).utcoffset() if configured_tz else None
+            log_state['timezone_offset_seconds'] = int(utc_offset.total_seconds()) if utc_offset is not None else None
+        log_state['timezone_source'] = configured_source
 
         log_state['initialized'] = True
         log_state['offset'] = new_offset
         log_state['last_size'] = file_size
         log_state['last_mtime'] = mtime
+        log_state['file_identity'] = file_identity
+        log_state['buffer'] = ''
         state['log_stats'] = log_state
 
-        needs_save = changed
+        needs_save = changed or new_offset != offset
 
         result = {
             'count': _safe_int(log_state.get('base_total', 0)) + _safe_int(log_state.get('total', 0)),
-            'last_time': log_state['last_time'],
+            'last_time': _log_time_iso(log_state.get('last_time'), log_state.get('timezone_offset_seconds')),
+            'last_time_raw': log_state.get('last_time'),
             'success': _safe_int(log_state.get('base_success', 0)) + _safe_int(log_state.get('success', 0)),
-            'failed': _safe_int(log_state.get('base_failed', 0)) + _safe_int(log_state.get('failed', 0))
+            'failed': _safe_int(log_state.get('base_failed', 0)) + _safe_int(log_state.get('failed', 0)),
+            'log_available': True,
+            'partial': bool(log_state.get('partial', False)),
+            'skipped_bytes': _safe_int(log_state.get('skipped_bytes', 0)),
+            'timezone': {
+                'configured': str(CONFIG.get('log_timezone', 'auto')),
+                'source': log_state.get('timezone_source', 'unknown'),
+                'offset_seconds': log_state.get('timezone_offset_seconds'),
+            },
         }
         cache.set(cache_key, result)
 
     if needs_save:
         save_log_stats_state()
-    log_stats_path = CONFIG.get('log_stats_path')
+    log_stats_path = _resolve_panel_path(CONFIG.get('log_stats_path'))
     if log_stats_path and not os.path.exists(log_stats_path):
         save_log_stats_state(force=True)
     return result
@@ -1814,8 +2659,9 @@ def resolve_version_label(version):
     if not command_available('git'):
         return version_str
     _, tags_out, _ = run_cmd(
-        f'cd {CONFIG["cliproxy_dir"]} && git tag --contains {version_str}',
-        timeout=10
+        ['git', 'tag', '--contains', version_str],
+        cwd=_resolve_panel_path(CONFIG.get('cliproxy_dir')),
+        timeout=10,
     )
     if not tags_out:
         return version_str
@@ -1840,7 +2686,8 @@ def get_current_commit():
     if not command_available('git'):
         cache.set(cache_key, 'unknown')
         return 'unknown'
-    _, stdout, _ = run_cmd(f'cd {CONFIG["cliproxy_dir"]} && git rev-parse --short HEAD')
+    cliproxy_dir = _resolve_panel_path(CONFIG.get('cliproxy_dir'))
+    _, stdout, _ = run_cmd(['git', 'rev-parse', '--short', 'HEAD'], cwd=cliproxy_dir)
     result = stdout if stdout else 'unknown'
     cache.set(cache_key, result)
     return result
@@ -1854,16 +2701,28 @@ def get_latest_commit():
     if not command_available('git'):
         cache.set(cache_key, 'unknown')
         return 'unknown'
-    run_cmd(f'cd {CONFIG["cliproxy_dir"]} && git fetch origin main --quiet', timeout=10)
-    _, stdout, _ = run_cmd(f'cd {CONFIG["cliproxy_dir"]} && git rev-parse --short origin/main')
+    cliproxy_dir = _resolve_panel_path(CONFIG.get('cliproxy_dir'))
+    run_cmd(['git', 'fetch', 'origin', 'main', '--quiet'], cwd=cliproxy_dir, timeout=10)
+    _, stdout, _ = run_cmd(['git', 'rev-parse', '--short', 'origin/main'], cwd=cliproxy_dir)
     result = stdout if stdout else 'unknown'
     cache.set(cache_key, result)
     return result
 
-def check_for_updates(use_cache=True):
+def check_for_updates(use_cache=True, *, allow_network=True):
     """检查更新（使用GitHub releases）"""
+    cache_key = 'update_check_details'
+    if use_cache:
+        cached = cache.get(cache_key, max_age=60)
+        if cached is not None:
+            state['current_version'] = cached['current']
+            state['latest_version'] = cached['latest']
+            state['has_update'] = bool(cached['has_update'])
+            return bool(cached['has_update'])
+        if not allow_network:
+            return bool(state.get('has_update', False))
+
     current = get_local_version()
-    latest = get_github_release_version()
+    latest = get_github_release_version(use_cache=use_cache)
 
     # 统一展示版本格式
     current_display = _decorate_version_tag(current)
@@ -1871,13 +2730,29 @@ def check_for_updates(use_cache=True):
     state['current_version'] = current_display
     state['latest_version'] = latest_display
 
-    # 用规范化结果比较，避免 v 前缀导致误判
-    current_norm = _normalize_release_version(current_display)
-    latest_norm = _normalize_release_version(latest_display)
-    result = current_norm != latest_norm and latest_norm not in {'unknown', '', 'dev'} and current_norm not in {'unknown', '', 'dev'}
-    # 只缓存判断结果，不阻断 state 更新（否则 UI 可能卡在 unknown）
-    if use_cache:
-        cache.set('update_check', result)
+    # 语义比较避免把“本地版本更高”或前缀差异误判为可更新。
+    current_key = _release_version_key(current_display)
+    latest_key = _release_version_key(latest_display)
+    if current_key is not None and latest_key is not None:
+        result = latest_key > current_key
+    elif _is_git_repo(_resolve_panel_path(CONFIG.get('cliproxy_dir'))) and command_available('git'):
+        current_commit = get_current_commit()
+        latest_commit = get_latest_commit()
+        result = (
+            current_commit not in {'', 'unknown'}
+            and latest_commit not in {'', 'unknown'}
+            and current_commit != latest_commit
+        )
+    else:
+        # 无法可靠判断时宁可不执行破坏性的自动更新，并在界面保留 unknown。
+        result = False
+
+    cache.set(cache_key, {
+        'current': current_display,
+        'latest': latest_display,
+        'has_update': result,
+    })
+    state['has_update'] = result
     return result
 
 def is_idle():
@@ -1894,24 +2769,51 @@ def get_idle_state(stats=None):
     idle_threshold = max(0, int(CONFIG.get('idle_threshold_seconds', 0) or 0))
     result = {
         'is_idle': True,
+        'reason': 'no_requests',
+        'log_available': bool(stats.get('log_available', True)) if isinstance(stats, dict) else True,
         'last_request_time': last_time_str,
         'idle_threshold_seconds': idle_threshold,
         'idle_for_seconds': None,
         'idle_wait_seconds': 0,
+        'clock_skew_seconds': 0,
+        'timezone': stats.get('timezone') if isinstance(stats, dict) else None,
     }
 
     if not last_time_str:
+        if not result['log_available']:
+            # Missing activity data is not proof of idleness. Staying busy here
+            # prevents an automatic update from interrupting live traffic when
+            # a path/mount is wrong or a log is temporarily unavailable.
+            result['is_idle'] = False
+            result['reason'] = 'log_unavailable'
+            result['idle_wait_seconds'] = None
         return result
 
     try:
-        last_time = datetime.strptime(last_time_str, '%Y-%m-%d %H:%M:%S')
-        idle_seconds = max(0, int((datetime.now() - last_time).total_seconds()))
+        offset_seconds = None
+        timezone_meta = stats.get('timezone') if isinstance(stats, dict) else None
+        if isinstance(timezone_meta, dict):
+            offset_seconds = timezone_meta.get('offset_seconds')
+        last_time = _log_time_to_utc(last_time_str, offset_seconds)
+        if last_time is None:
+            result['is_idle'] = False
+            result['reason'] = 'invalid_timestamp'
+            result['idle_wait_seconds'] = None
+            return result
+        elapsed = int((_utc_now() - last_time).total_seconds())
+        idle_seconds = max(0, elapsed)
         idle_wait_seconds = max(0, idle_threshold - idle_seconds)
+        result['last_request_time'] = _utc_iso(last_time)
         result['idle_for_seconds'] = idle_seconds
         result['idle_wait_seconds'] = idle_wait_seconds
+        result['clock_skew_seconds'] = max(0, -elapsed)
         result['is_idle'] = idle_wait_seconds == 0
+        result['reason'] = 'threshold_reached' if result['is_idle'] else ('clock_skew' if elapsed < 0 else 'recent_request')
         return result
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
+        result['is_idle'] = False
+        result['reason'] = 'invalid_timestamp'
+        result['idle_wait_seconds'] = None
         return result
 
 
@@ -1925,11 +2827,14 @@ def get_auto_update_state(has_update=None, stats=None):
     idle_state = get_idle_state(stats)
     next_check_time = state.get('next_auto_update_check_time')
     next_check_in_seconds = None
-    if next_check_time:
+    next_check_monotonic = state.get('next_auto_update_check_monotonic')
+    if next_check_monotonic is not None:
+        next_check_in_seconds = max(0, int(float(next_check_monotonic) - time.monotonic()))
+    elif next_check_time:
         try:
-            next_check_dt = datetime.fromisoformat(next_check_time)
-            next_check_in_seconds = max(0, int((next_check_dt - datetime.now()).total_seconds()))
-        except Exception:
+            next_check_dt = _parse_iso_datetime(next_check_time)
+            next_check_in_seconds = max(0, int((next_check_dt - _utc_now()).total_seconds())) if next_check_dt else None
+        except (TypeError, ValueError, OverflowError):
             next_check_in_seconds = None
 
     summary = '等待状态更新'
@@ -1940,12 +2845,22 @@ def get_auto_update_state(has_update=None, stats=None):
     elif state.get('update_in_progress'):
         phase = 'updating'
         summary = '正在执行自动更新'
+    elif _normalize_release_version(state.get('latest_version')) in {'', 'unknown'}:
+        phase = 'checking'
+        summary = '正在检查最新版本'
     elif not has_update:
         phase = 'no_update'
         summary = '已是最新版本'
     elif not idle_state.get('is_idle'):
         phase = 'wait_idle'
-        summary = f'还需空闲 {idle_state.get("idle_wait_seconds", 0)} 秒'
+        if idle_state.get('reason') == 'log_unavailable':
+            summary = '等待可用的请求日志'
+        elif idle_state.get('reason') == 'invalid_timestamp':
+            summary = '等待有效的请求时间戳'
+        elif idle_state.get('reason') == 'clock_skew':
+            summary = '等待服务器时钟恢复一致'
+        else:
+            summary = f'还需空闲 {idle_state.get("idle_wait_seconds", 0)} 秒'
     elif next_check_in_seconds is not None and next_check_in_seconds > 0:
         phase = 'wait_check'
         summary = f'{next_check_in_seconds} 秒后进行下一次检查'
@@ -1964,146 +2879,252 @@ def get_auto_update_state(has_update=None, stats=None):
         'idle': idle_state,
     }
 
-def perform_update():
-    if state['update_in_progress']:
-        return False, 'Update already in progress'
+def _wait_for_service_running(service_name, timeout=15):
+    """Wait for two consecutive active samples so crash loops do not look healthy."""
+    deadline = time.monotonic() + max(1, timeout)
+    consecutive = 0
+    last_status = None
+    while time.monotonic() < deadline:
+        cache.invalidate('service_status')
+        last_status = get_service_status(use_cache=False)
+        if last_status.get('running'):
+            consecutive += 1
+            if consecutive >= 2:
+                return True, last_status
+        else:
+            consecutive = 0
+        time.sleep(1)
+    return False, last_status or get_service_status(use_cache=False)
 
-    if not (is_linux() and command_available('systemctl')):
-        return False, {'success': False, 'message': 'Update only supported on Linux with systemd', 'details': []}
+
+def perform_update(*, lock_acquired=False):
+    if not lock_acquired and not update_lock.acquire(blocking=False):
+        return False, 'Update already in progress'
 
     state['update_in_progress'] = True
     result = {'success': False, 'message': '', 'details': []}
+    service_stopped = False
+    service_name = _systemd_service_name()
+    backup_path = None
+    staged_target = None
+    replaced_binary = False
+    updated_release_version = None
+    source_target_commit = None
+
+    configured_binary = _resolve_panel_path(CONFIG.get('cliproxy_binary'))
+    cliproxy_bin = os.path.realpath(configured_binary) if configured_binary and os.path.lexists(configured_binary) else configured_binary
+    cliproxy_dir = _resolve_panel_path(CONFIG.get('cliproxy_dir'))
 
     try:
-        result['details'].append('Stopping service...')
-        run_cmd(f'systemctl stop {CONFIG["cliproxy_service"]}')
-        time.sleep(2)
+        if not (is_linux() and command_available('systemctl')):
+            result['message'] = 'Update only supported on Linux with systemd'
+            return False, result
+        if not service_name:
+            result['message'] = 'Service name is missing or invalid'
+            return False, result
+        if not cliproxy_bin:
+            result['message'] = 'Binary path not set (CLIPROXY_PANEL_CLIPROXY_BINARY)'
+            return False, result
 
-        # ===== 更新策略选择 =====
-        # A) 源码安装：git pull + go build（旧逻辑）
-        # B) release 二进制：下载最新 release 并替换二进制（推荐）
-        cliproxy_dir = CONFIG.get('cliproxy_dir')
-        cliproxy_bin = CONFIG.get('cliproxy_binary') or ''
-        backup_path = None
-        updated_release_version = None
+        target_parent = os.path.dirname(os.path.abspath(cliproxy_bin))
+        os.makedirs(target_parent, exist_ok=True)
+        old_binary_existed = os.path.isfile(cliproxy_bin)
+        old_mode = stat_module.S_IMODE(os.stat(cliproxy_bin).st_mode) if old_binary_existed else 0o755
 
+        fd, staged_target = tempfile.mkstemp(
+            prefix=f'.{os.path.basename(cliproxy_bin)}.',
+            suffix='.new',
+            dir=target_parent,
+        )
+        os.close(fd)
+        os.remove(staged_target)
+
+        # Prepare and verify the new binary while the current service remains
+        # online. The actual downtime is limited to stop/replace/start.
         use_source_update = _is_git_repo(cliproxy_dir) and command_available('git') and command_available('go')
-
         if use_source_update:
-            result['details'].append('Pulling latest code...')
-            success, stdout, stderr = run_cmd(f'cd {cliproxy_dir} && git fetch --tags && git pull origin main')
-            if not success:
-                result['message'] = f'Pull failed: {stderr}'
-                return False, result
-            result['details'].append(stdout)
-
-            result['details'].append('Rebuilding...')
-            success, stdout, stderr = run_cmd(
-                f'cd {cliproxy_dir} && go build -o cliproxy ./cmd/server',
-                timeout=300
+            result['details'].append('Fetching and building the new source revision...')
+            success, _, stderr = run_cmd(
+                ['git', 'fetch', '--tags', 'origin', 'main'],
+                cwd=cliproxy_dir,
+                timeout=90,
             )
             if not success:
-                result['message'] = f'Build failed: {stderr}'
-                run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
+                result['message'] = f'Fetch failed: {stderr}'
                 return False, result
-            result['details'].append('Build successful')
+
+            success, commit_out, stderr = run_cmd(
+                ['git', 'rev-parse', 'origin/main'],
+                cwd=cliproxy_dir,
+                timeout=15,
+            )
+            if not success or not re.fullmatch(r'[0-9a-fA-F]{40}', commit_out):
+                result['message'] = f'Failed to resolve fetched revision: {stderr or commit_out}'
+                return False, result
+            source_target_commit = commit_out.lower()
+
+            with tempfile.TemporaryDirectory(prefix='cpa-update-build-') as build_root:
+                worktree_path = os.path.join(build_root, 'source')
+                worktree_added = False
+                try:
+                    success, _, stderr = run_cmd(
+                        ['git', 'worktree', 'add', '--detach', worktree_path, source_target_commit],
+                        cwd=cliproxy_dir,
+                        timeout=60,
+                    )
+                    if not success:
+                        result['message'] = f'Failed to create isolated build tree: {stderr}'
+                        return False, result
+                    worktree_added = True
+                    success, _, stderr = run_cmd(
+                        ['go', 'build', '-trimpath', '-o', staged_target, './cmd/server'],
+                        cwd=worktree_path,
+                        timeout=600,
+                    )
+                    if not success:
+                        result['message'] = f'Build failed: {stderr}'
+                        return False, result
+                finally:
+                    if worktree_added:
+                        run_cmd(
+                            ['git', 'worktree', 'remove', '--force', worktree_path],
+                            cwd=cliproxy_dir,
+                            timeout=30,
+                        )
+                    run_cmd(['git', 'worktree', 'prune'], cwd=cliproxy_dir, timeout=15)
+
+            _, tag_out, _ = run_cmd(
+                ['git', 'describe', '--tags', '--abbrev=0', source_target_commit],
+                cwd=cliproxy_dir,
+                timeout=15,
+            )
+            if _release_version_key(tag_out) is not None:
+                updated_release_version = tag_out
+            result['details'].append('Isolated build completed successfully')
         else:
-            if not cliproxy_bin:
-                result['message'] = 'Binary path not set (CLIPROXY_PANEL_CLIPROXY_BINARY)'
-                run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
-                return False, result
-
-            # 为回滚做备份（更新后启动失败时可恢复）
-            try:
-                if os.path.exists(cliproxy_bin):
-                    ts = datetime.now().strftime('%Y%m%d-%H%M%S')
-                    backup_path = f'{cliproxy_bin}.bak.{ts}'
-                    shutil.copy2(cliproxy_bin, backup_path)
-                    result['details'].append(f'Backup created: {backup_path}')
-                    deleted_backups = cleanup_binary_backups(cliproxy_bin)
-                    if deleted_backups:
-                        result['details'].append(f'Old backups removed: {len(deleted_backups)}')
-            except Exception as e:
-                result['message'] = f'Backup failed: {e}'
-                run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
-                return False, result
-
-            result['details'].append('Downloading latest release...')
-            ok, msg, updated_release_version = update_from_github_release(binary_path=cliproxy_bin)
+            result['details'].append('Downloading and verifying the latest release...')
+            ok, msg, updated_release_version = update_from_github_release(binary_path=staged_target)
             if not ok:
-                result['message'] = msg or 'Release update failed'
-                run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
+                result['message'] = msg or 'Release preparation failed'
                 return False, result
-            result['details'].append(msg or 'Release binary updated')
+            result['details'].append(msg or 'Release verified')
 
-        def _rollback_release_binary(reason: str) -> bool:
-            if not backup_path or not cliproxy_bin:
-                return False
+        if not os.path.isfile(staged_target) or os.path.getsize(staged_target) < 128 * 1024:
+            result['message'] = 'Prepared binary is missing or unexpectedly small'
+            return False, result
+        # Preserve the already deployed executable's access mode.
+        os.chmod(staged_target, old_mode)
+
+        if old_binary_existed:
+            cleanup_binary_backups(cliproxy_bin)
+            backup_path = create_binary_backup(cliproxy_bin)
+            if not backup_path:
+                result['message'] = 'Failed to create a rollback point'
+                return False, result
+            result['details'].append(f'Rollback point created: {backup_path}')
+
+        result['details'].append('Stopping service for atomic replacement...')
+        stopped, _, stop_error = run_cmd(['systemctl', 'stop', service_name])
+        if not stopped:
+            result['message'] = f'Failed to stop service: {stop_error or "unknown error"}'
+            return False, result
+        service_stopped = True
+        cache.invalidate('service_status')
+
+        os.replace(staged_target, cliproxy_bin)
+        _fsync_parent_directory(cliproxy_bin)
+        staged_target = None
+        replaced_binary = True
+
+        def rollback_binary(reason):
+            nonlocal service_stopped
             result['details'].append(f'Rollback: {reason}')
             try:
-                shutil.copy2(backup_path, cliproxy_bin)
-                try:
-                    os.chmod(cliproxy_bin, 0o755)
-                except Exception:
-                    pass
-                run_cmd(f'systemctl restart {CONFIG["cliproxy_service"]}')
-                time.sleep(2)
-                status2 = get_service_status()
-                if status2.get('running'):
+                run_cmd(['systemctl', 'stop', service_name])
+                if backup_path and os.path.isfile(backup_path):
+                    os.replace(backup_path, cliproxy_bin)
+                    _fsync_parent_directory(cliproxy_bin)
+                elif replaced_binary and not old_binary_existed and os.path.isfile(cliproxy_bin):
+                    os.remove(cliproxy_bin)
+                restarted, _, restart_error = run_cmd(['systemctl', 'start', service_name])
+                cache.invalidate('service_status')
+                running, _ = _wait_for_service_running(service_name, timeout=10) if restarted else (False, None)
+                service_stopped = not running
+                if running:
                     result['details'].append('Rollback successful')
                     return True
-                result['details'].append('Rollback attempted but service still not running')
-            except Exception as e:
-                result['details'].append(f'Rollback failed: {e}')
+                result['details'].append(f'Rollback restart failed: {restart_error or "service inactive"}')
+            except Exception as exc:
+                result['details'].append(f'Rollback failed: {exc}')
             return False
 
         result['details'].append('Starting service...')
-        success, _, stderr = run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
+        success, _, stderr = run_cmd(['systemctl', 'start', service_name])
+        cache.invalidate('service_status')
         if not success:
-            rolled_back = _rollback_release_binary('start failed after update')
+            rolled_back = rollback_binary('start command failed after update')
             result['message'] = f'Start failed: {stderr}' + (' (rolled back)' if rolled_back else '')
             return False, result
 
-        time.sleep(2)
-
-        status = get_service_status()
-        if not status['running']:
-            rolled_back = _rollback_release_binary('service not running after start')
-            result['message'] = 'Service not running after start' + (' (rolled back)' if rolled_back else '')
+        running, _ = _wait_for_service_running(service_name, timeout=15)
+        if not running:
+            rolled_back = rollback_binary('service did not remain active after update')
+            result['message'] = 'Service failed its post-update startup check' + (' (rolled back)' if rolled_back else '')
             return False, result
+        service_stopped = False
+
+        # Only advance the source checkout after the new binary has proved it
+        # can stay active. A failed deployment can then roll back without
+        # leaving git metadata that falsely reports the newer version.
+        if source_target_commit:
+            merged, merge_out, merge_error = run_cmd(
+                ['git', 'merge', '--ff-only', source_target_commit],
+                cwd=cliproxy_dir,
+                timeout=90,
+            )
+            if merged:
+                if merge_out:
+                    result['details'].append(merge_out[-1000:])
+            else:
+                result['details'].append(
+                    'Warning: binary updated but source checkout could not fast-forward: '
+                    f'{merge_error or merge_out or "unknown git error"}'
+                )
 
         result['success'] = True
         result['message'] = 'Update successful'
-        result['details'].append('Service is running')
+        result['details'].append('Service is running and stable')
+        state['last_update_time'] = _utc_iso()
 
-        state['last_update_time'] = datetime.now().isoformat()
-        state['last_update_result'] = result
+        for cache_key in ('local_version', 'local_version_mgmt', 'current_commit', 'github_release', 'update_check_details'):
+            cache.invalidate(cache_key)
         state['current_version'] = get_local_version()
-        # 如果本地/上游返回的是 unknown/hash 等，优先用本次 release 更新的版本号展示
-        if updated_release_version and not _is_semver_like(state.get('current_version')):
+        updated_key = _release_version_key(updated_release_version)
+        detected_key = _release_version_key(state.get('current_version'))
+        if updated_key is not None and (detected_key is None or detected_key < updated_key):
             state['current_version'] = _decorate_version_tag(updated_release_version)
+        record_update_history(state['current_version'])
 
-        # 记录更新历史
-        try:
-            record_update_history(state['current_version'])
-        except Exception as e:
-            print(f"Failed to record update history: {e}")
-        # 清除版本缓存
-        try:
-            cache.invalidate('local_version')
-            cache.invalidate('github_release')
-            cache.invalidate('update_check')
-        except Exception:
-            pass
-
+        deleted_backups = cleanup_binary_backups(cliproxy_bin)
+        if deleted_backups:
+            result['details'].append(f'Old backups removed: {len(deleted_backups)}')
         return True, result
 
-    except Exception as e:
-        result['message'] = f'Update error: {str(e)}'
-        run_cmd(f'systemctl start {CONFIG["cliproxy_service"]}')
+    except Exception as exc:
+        result['message'] = f'Update error: {exc}'
         return False, result
     finally:
+        if staged_target:
+            try:
+                os.remove(staged_target)
+            except OSError:
+                pass
+        if service_stopped and service_name and is_linux() and command_available('systemctl'):
+            run_cmd(['systemctl', 'start', service_name])
+            cache.invalidate('service_status')
+        state['last_update_result'] = result
         state['update_in_progress'] = False
+        update_lock.release()
 
 
 def _guess_goarch():
@@ -2114,13 +3135,15 @@ def _guess_goarch():
         return 'amd64'
     if machine.startswith('armv7') or machine == 'armv7l':
         return 'armv7'
-    return 'arm64'  # 默认偏向 arm64（常见于 N1 等设备）
+    if machine in {'i386', 'i686', 'x86'}:
+        return '386'
+    return None
 
 
 def update_from_github_release(binary_path=''):
     """
-    下载并安装 CLIProxyAPI 最新 release（二进制安装场景）。
-    依赖：systemd + curl/requests 可用；需要当前进程有写入 binary_path 的权限（通常为 root）。
+    下载、校验并写入 CLIProxyAPI 最新 release 到指定目标。
+    调用方可传入暂存路径，再自行原子替换正式二进制。
 
     返回：(ok, message, release_tag)
     """
@@ -2129,6 +3152,8 @@ def update_from_github_release(binary_path=''):
             return False, 'Binary path not set', None
 
         goarch = _guess_goarch()
+        if not goarch:
+            return False, f'Unsupported CPU architecture: {platform.machine() or "unknown"}', None
 
         repo = 'router-for-me/CLIProxyAPI'
         api_error = None
@@ -2141,24 +3166,28 @@ def update_from_github_release(binary_path=''):
             if token:
                 headers['Authorization'] = 'Bearer ' + token
 
-            resp = requests.get(
+            with http_session.get(
                 f'https://api.github.com/repos/{repo}/releases/latest',
                 headers=headers,
                 timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json() if resp.content else {}
+                stream=True,
+            ) as resp:
+                resp.raise_for_status()
+                data = _response_json_limited(resp, 4 * 1024 * 1024)
         except Exception as e:
             api_error = e
             data = {}
             print(f'Warning: failed to fetch release info via GitHub API: {e}')
 
         resolved_tag = _decorate_version_tag((data.get('tag_name') or '') if isinstance(data, dict) else '')
+        if _release_version_key(resolved_tag) is None:
+            resolved_tag = ''
 
         assets = data.get('assets', []) if isinstance(data, dict) else []
 
         asset_url = ''
         checksum_url = ''
+        asset_name = ''
         for a in assets:
             name = (a.get('name') or '')
             url = (a.get('browser_download_url') or '')
@@ -2166,6 +3195,7 @@ def update_from_github_release(binary_path=''):
                 continue
             if name.endswith(f'linux_{goarch}.tar.gz'):
                 asset_url = url
+                asset_name = name
             elif name == 'checksums.txt':
                 checksum_url = url
 
@@ -2175,7 +3205,7 @@ def update_from_github_release(binary_path=''):
                 resolved_tag = _decorate_version_tag(get_github_release_version())
             tag_display = resolved_tag
             tag_number = _normalize_release_version(tag_display)
-            if not tag_number or tag_number in {'unknown', 'dev'}:
+            if not tag_number or _release_version_key(tag_display) is None:
                 if api_error:
                     return False, f'Failed to fetch latest release info (GitHub API limited): {api_error}', None
                 return False, 'Failed to resolve latest release tag', None
@@ -2190,46 +3220,70 @@ def update_from_github_release(binary_path=''):
         with tempfile.TemporaryDirectory() as tmpdir:
             tar_path = os.path.join(tmpdir, 'cliproxyapi.tar.gz')
             # 下载 tarball
-            with requests.get(asset_url, timeout=60, stream=True) as r:
+            max_download_bytes = 512 * 1024 * 1024
+            with http_session.get(asset_url, timeout=(10, 60), stream=True) as r:
                 r.raise_for_status()
+                content_length = _safe_int(r.headers.get('Content-Length'), 0)
+                if content_length and content_length > max_download_bytes:
+                    return False, 'Release package is unexpectedly large', resolved_tag or None
+                downloaded = 0
                 with open(tar_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=1024 * 1024):
                         if chunk:
+                            downloaded += len(chunk)
+                            if downloaded > max_download_bytes:
+                                return False, 'Release package exceeded the download size limit', resolved_tag or None
                             f.write(chunk)
+                    f.flush()
+                    os.fsync(f.fileno())
 
-            # 校验 sha256（如果 checksums 可用）
+            # 校验 sha256。默认严格校验，避免安装截断或被篡改的二进制。
+            require_checksum = _parse_bool(CONFIG.get('update_require_checksum', True))
             if checksum_url:
                 try:
-                    c = requests.get(checksum_url, timeout=15)
-                    if c.status_code != 200:
-                        raise RuntimeError(f'checksums status: {c.status_code}')
+                    with http_session.get(checksum_url, timeout=15, stream=True) as c:
+                        if c.status_code != 200:
+                            raise RuntimeError(f'checksums status: {c.status_code}')
+                        checksum_raw = c.raw.read(2 * 1024 * 1024 + 1, decode_content=True)
+                    if len(checksum_raw) > 2 * 1024 * 1024:
+                        raise RuntimeError('checksums file is unexpectedly large')
+                    checksum_text = checksum_raw.decode('utf-8', errors='strict')
                     expected = None
-                    for line in c.text.splitlines():
+                    for line in checksum_text.splitlines():
                         parts = line.strip().split()
-                        if len(parts) >= 2 and parts[-1].endswith(f'linux_{goarch}.tar.gz'):
+                        if len(parts) >= 2 and os.path.basename(parts[-1].lstrip('*')) == asset_name:
                             expected = parts[0]
                             break
-                    if expected:
-                        import hashlib
-                        h = hashlib.sha256()
-                        with open(tar_path, 'rb') as f:
-                            for chunk in iter(lambda: f.read(1024 * 1024), b''):
-                                h.update(chunk)
-                        actual = h.hexdigest()
-                        if actual.lower() != expected.lower():
-                            return False, 'Checksum mismatch (download may be corrupted)', resolved_tag or None
+                    if not expected or not re.fullmatch(r'[0-9a-fA-F]{64}', expected):
+                        raise RuntimeError(f'checksum entry missing for {asset_name}')
+                    digest = hashlib.sha256()
+                    with open(tar_path, 'rb') as f:
+                        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                            digest.update(chunk)
+                    actual = digest.hexdigest()
+                    if not hmac.compare_digest(actual.lower(), expected.lower()):
+                        return False, 'Checksum mismatch (download may be corrupted)', resolved_tag or None
                 except Exception as e:
-                    # 不阻断更新，但记录一下
-                    print(f'Warning: checksum verify skipped/failed: {e}')
+                    if require_checksum:
+                        return False, f'Checksum verification failed: {e}', resolved_tag or None
+                    print(f'Warning: checksum verification skipped: {e}')
+            elif require_checksum:
+                return False, 'Release checksum is unavailable', resolved_tag or None
 
             # 解压并找到二进制
             try:
                 def _safe_extract(tar, target_dir):
                     target_dir_abs = os.path.abspath(target_dir)
+                    total_size = 0
                     for member in tar.getmembers():
                         # 防御更严格：拒绝符号链接/硬链接，避免“先解出链接再写文件”绕过路径校验
                         if getattr(member, 'issym', lambda: False)() or getattr(member, 'islnk', lambda: False)():
                             raise RuntimeError(f'Unsafe link in tar: {member.name}')
+                        if not (member.isfile() or member.isdir()):
+                            raise RuntimeError(f'Unsupported archive entry: {member.name}')
+                        total_size += max(0, int(member.size or 0))
+                        if total_size > 1024 * 1024 * 1024:
+                            raise RuntimeError('Archive expands beyond the safety limit')
                         member_path = os.path.abspath(os.path.join(target_dir_abs, member.name))
                         if not member_path.startswith(target_dir_abs + os.sep) and member_path != target_dir_abs:
                             raise RuntimeError(f'Unsafe path in tar: {member.name}')
@@ -2311,80 +3365,102 @@ def update_from_github_release(binary_path=''):
                 return False, 'No binary found in release package', resolved_tag or None
 
             # 原子替换
-            tmp_target = f'{binary_path}.tmp'
-            shutil.copy2(extracted_bin, tmp_target)
-            os.chmod(tmp_target, 0o755)
-            os.replace(tmp_target, binary_path)
+            target_parent = os.path.dirname(os.path.abspath(binary_path))
+            os.makedirs(target_parent, exist_ok=True)
+            fd, tmp_target = tempfile.mkstemp(prefix=f'.{os.path.basename(binary_path)}.', suffix='.new', dir=target_parent)
+            os.close(fd)
+            try:
+                shutil.copyfile(extracted_bin, tmp_target)
+                with open(tmp_target, 'r+b') as handle:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                # Release payload is the executable launched by systemd.
+                os.chmod(tmp_target, 0o755)  # nosec B103
+                os.replace(tmp_target, binary_path)
+            finally:
+                try:
+                    os.remove(tmp_target)
+                except OSError:
+                    pass
 
         tag_for_message = resolved_tag or 'unknown'
-        return True, f'Release updated to {tag_for_message} for linux_{goarch}', resolved_tag or None
+        return True, f'Release {tag_for_message} verified for linux_{goarch}', resolved_tag or None
     except Exception as e:
         return False, f'Release update error: {e}', None
 
 def auto_update_worker():
+    first_check = True
     while True:
         interval = max(60, int(CONFIG.get('auto_update_check_interval', 300) or 300))
-        state['next_auto_update_check_time'] = (datetime.now() + timedelta(seconds=interval)).isoformat()
-        time.sleep(interval)
-        state['last_auto_update_check_time'] = datetime.now().isoformat()
+        wait_seconds = min(5, interval) if first_check else interval
+        first_check = False
+        state['next_auto_update_check_monotonic'] = time.monotonic() + wait_seconds
+        state['next_auto_update_check_time'] = _utc_iso(_utc_now() + timedelta(seconds=wait_seconds))
+        if auto_update_wakeup.wait(wait_seconds):
+            auto_update_wakeup.clear()
+            continue
+        state['next_auto_update_check_monotonic'] = None
+        state['last_auto_update_check_time'] = _utc_iso()
 
         if not state['auto_update_enabled']:
-            print(f'[{datetime.now()}] Auto-update skipped: disabled')
+            print(f'[{_utc_iso()}] Auto-update skipped: disabled')
             continue
 
         if state['update_in_progress']:
-            print(f'[{datetime.now()}] Auto-update skipped: update already in progress')
+            print(f'[{_utc_iso()}] Auto-update skipped: update already in progress')
             continue
 
         try:
-            has_update = check_for_updates()
+            has_update = check_for_updates(use_cache=False)
             if not has_update:
-                print(f'[{datetime.now()}] Auto-update check: no new release')
+                print(f'[{_utc_iso()}] Auto-update check: no new release')
                 continue
 
             idle_state = get_idle_state()
             if idle_state.get('is_idle'):
-                print(f'[{datetime.now()}] Update detected and system idle, starting auto-update...')
+                print(f'[{_utc_iso()}] Update detected and system idle, starting auto-update...')
                 perform_update()
             else:
                 print(
-                    f'[{datetime.now()}] Auto-update skipped: busy, '
+                    f'[{_utc_iso()}] Auto-update skipped: busy, '
                     f'last request at {idle_state.get("last_request_time")}, '
                     f'threshold={CONFIG["idle_threshold_seconds"]}s'
                 )
         except Exception as e:
-            print(f'[{datetime.now()}] Auto-update check failed: {e}')
+            print(f'[{_utc_iso()}] Auto-update check failed: {e}')
 
 def parse_log_file(log_file, max_lines=100, limit=None):
     """解析日志文件（优化：Python原生读取，提取实际时间戳）"""
+    log_file = _resolve_panel_path(log_file)
     if not os.path.exists(log_file):
         return []
     if limit is None:
         limit = max_lines if max_lines and max_lines > 0 else 50
 
-    # 匹配日志时间格式: [2026-01-18 23:48:53]
-    time_pattern = re.compile(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]')
-
     try:
         lines = read_log_tail(log_file, max_lines=max_lines)
+        timestamp_values = [match.group(1) for line in lines if (match := LOG_TIME_PATTERN.search(line))]
+        try:
+            file_mtime = os.path.getmtime(log_file)
+        except OSError:
+            file_mtime = None
+        inferred_offset = _infer_timezone_offset_seconds(timestamp_values[-1], file_mtime) if timestamp_values else None
+        if inferred_offset is None:
+            with log_stats_lock:
+                inferred_offset = state.get('log_stats', {}).get('timezone_offset_seconds')
+        fallback_time = _utc_iso(datetime.fromtimestamp(file_mtime, tz=UTC)) if file_mtime is not None else _utc_iso()
 
         logs = []
         for line in lines:
             line = line.strip()
             if line:
                 # 尝试从日志中提取时间
-                time_match = time_pattern.search(line)
+                time_match = LOG_TIME_PATTERN.search(line)
                 if time_match:
-                    # 解析日志中的时间（服务器是UTC）
                     log_time_str = time_match.group(1)
-                    try:
-                        log_time = datetime.strptime(log_time_str, '%Y-%m-%d %H:%M:%S')
-                        # 标记为UTC时间
-                        time_iso = log_time.isoformat() + 'Z'
-                    except:
-                        time_iso = datetime.utcnow().isoformat() + 'Z'
+                    time_iso = _log_time_iso(log_time_str, inferred_offset) or fallback_time
                 else:
-                    time_iso = datetime.utcnow().isoformat() + 'Z'
+                    time_iso = fallback_time
 
                 logs.append({
                     'time': time_iso,
@@ -2393,19 +3469,19 @@ def parse_log_file(log_file, max_lines=100, limit=None):
                 })
 
         return logs[-limit:]
-    except:
+    except (OSError, ValueError, TypeError):
         return []
 
 
 def parse_journal_logs(service_name, max_lines=100):
     """读取 systemd journal，补齐 CLIProxyAPI 后台日志"""
+    service_name = _systemd_service_name(service_name)
     if not service_name or not is_linux() or not command_available('journalctl'):
         return []
 
-    safe_service = shlex.quote(str(service_name))
     ok, stdout, _ = run_cmd(
-        f'journalctl -u {safe_service} -n {int(max_lines)} --no-pager -o json',
-        timeout=20
+        ['journalctl', '-u', str(service_name), '-n', str(int(max_lines)), '--no-pager', '-o', 'json'],
+        timeout=20,
     )
     if not ok or not stdout:
         return []
@@ -2424,13 +3500,13 @@ def parse_journal_logs(service_name, max_lines=100):
         if not message:
             continue
 
-        time_iso = datetime.utcnow().isoformat() + 'Z'
+        time_iso = _utc_iso()
         ts_raw = item.get('_SOURCE_REALTIME_TIMESTAMP') or item.get('__REALTIME_TIMESTAMP')
         if ts_raw:
             try:
                 ts_value = int(str(ts_raw)) / 1_000_000
-                time_iso = datetime.fromtimestamp(ts_value).isoformat() + 'Z'
-            except Exception:
+                time_iso = _utc_iso(datetime.fromtimestamp(ts_value, tz=UTC))
+            except (TypeError, ValueError, OSError, OverflowError):
                 pass
 
         logs.append({
@@ -2456,7 +3532,7 @@ def merge_log_entries(*groups, limit=200):
                 continue
             time_value = str(entry.get('time') or '').strip()
             source = str(entry.get('source') or '').strip()
-            dedupe_key = (time_value, message, source)
+            dedupe_key = (time_value, message)
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
@@ -2481,13 +3557,22 @@ def parse_request_logs(max_lines=200, use_cache=True):
         if cached:
             return cached
 
-    log_file = CONFIG['cliproxy_log']
+    log_file = _resolve_panel_path(CONFIG.get('cliproxy_log'))
 
     if not os.path.exists(log_file):
         return [], empty_stats
 
     try:
         lines = read_log_tail(log_file, max_lines=max_lines)
+        timestamp_values = [match.group(1) for line in lines if (match := LOG_TIME_PATTERN.search(line))]
+        try:
+            file_mtime = os.path.getmtime(log_file)
+        except OSError:
+            file_mtime = None
+        inferred_offset = _infer_timezone_offset_seconds(timestamp_values[-1], file_mtime) if timestamp_values else None
+        if inferred_offset is None:
+            with log_stats_lock:
+                inferred_offset = state.get('log_stats', {}).get('timezone_offset_seconds')
 
         logs = []
         # 使用预编译的正则表达式
@@ -2497,7 +3582,7 @@ def parse_request_logs(max_lines=200, use_cache=True):
                 timestamp, status, duration, client_ip, method, path = match.groups()
                 client_ip = client_ip.strip()
                 logs.append({
-                    'time': timestamp,
+                    'time': _log_time_iso(timestamp, inferred_offset),
                     'status': int(status),
                     'duration': duration,
                     'client': client_ip,
@@ -2508,7 +3593,7 @@ def parse_request_logs(max_lines=200, use_cache=True):
 
         # 统计
         total = len(logs)
-        success = sum(1 for l in logs if l['status'] < 400)
+        success = sum(1 for entry in logs if entry['status'] < 400)
         failed = total - success
 
         result = (logs[-50:], {'total': total, 'success': success, 'failed': failed})
@@ -2520,11 +3605,11 @@ def parse_request_logs(max_lines=200, use_cache=True):
 
 def get_paths_info():
     return {
-        'config': CONFIG['cliproxy_config'],
-        'auth_dir': CONFIG['auth_dir'],
-        'binary': CONFIG['cliproxy_binary'],
-        'logs': os.path.dirname(CONFIG['cliproxy_log']),
-        'project_dir': CONFIG['cliproxy_dir']
+        'config': _resolve_panel_path(CONFIG.get('cliproxy_config')),
+        'auth_dir': _resolve_panel_path(CONFIG.get('auth_dir')),
+        'binary': _resolve_panel_path(CONFIG.get('cliproxy_binary')),
+        'logs': os.path.dirname(_resolve_panel_path(CONFIG.get('cliproxy_log'))),
+        'project_dir': _resolve_panel_path(CONFIG.get('cliproxy_dir')),
     }
 
 def load_cliproxy_config(use_cache=True):
@@ -2535,9 +3620,14 @@ def load_cliproxy_config(use_cache=True):
         if cached:
             return cached
 
-    config_path = CONFIG['cliproxy_config']
+    config_path = _resolve_panel_path(CONFIG.get('cliproxy_config'))
     if not os.path.exists(config_path):
         return None, 'Config file not found'
+    try:
+        if os.path.getsize(config_path) > 2 * 1024 * 1024:
+            return None, 'Config file exceeds the 2 MiB limit'
+    except OSError as exc:
+        return None, str(exc)
 
     if not HAS_YAML:
         # 没有yaml模块时返回原始内容
@@ -2552,6 +3642,8 @@ def load_cliproxy_config(use_cache=True):
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
+            if not isinstance(config, dict):
+                return None, 'Config root must be a mapping/object'
             result = (config, None)
             cache.set(cache_key, result)
             return result
@@ -2607,9 +3699,17 @@ def validate_yaml_config(content):
         # 检查路由策略
         if 'routing' in config:
             valid_strategies = ['round-robin', 'fill-first']
-            strategy = config['routing'].get('strategy', '')
-            if strategy and strategy not in valid_strategies:
-                warnings.append(f'未知的路由策略: {strategy}，有效值: {", ".join(valid_strategies)}')
+            routing = config['routing']
+            if not isinstance(routing, dict):
+                errors.append('routing 必须是一个对象')
+            else:
+                strategy = routing.get('strategy', '')
+                if strategy and strategy not in valid_strategies:
+                    warnings.append(f'未知的路由策略: {strategy}，有效值: {", ".join(valid_strategies)}')
+
+        auth_dir = config.get('auth-dir')
+        if auth_dir is not None and (not isinstance(auth_dir, str) or not auth_dir.strip()):
+            errors.append('auth-dir 必须是非空字符串')
 
         return {
             'valid': len(errors) == 0,
@@ -2632,7 +3732,7 @@ def get_system_resources(use_cache=True):
         if cached:
             return cached
 
-    disk_path = CONFIG.get('disk_path') or '/'
+    disk_path = _resolve_panel_path(CONFIG.get('disk_path') or '/')
     system_info = get_system_info()
     cliproxy_usage = get_cliproxy_process_usage()
 
@@ -2645,13 +3745,14 @@ def get_system_resources(use_cache=True):
             'network': {'bytes_sent': 0, 'bytes_recv': 0},
             'system': system_info,
             'cliproxy': cliproxy_usage,
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': _utc_iso(),
             'limited': True
         }
 
         # 尝试获取内存信息（Linux）
         if is_linux() and command_available('free'):
-            _, mem_out, _ = run_cmd('free -b 2>/dev/null | grep Mem')
+            _, free_out, _ = run_cmd(['free', '-b'])
+            mem_out = next((line for line in free_out.splitlines() if line.lstrip().startswith('Mem:')), '')
             if mem_out:
                 parts = mem_out.split()
                 if len(parts) >= 4:
@@ -2662,7 +3763,7 @@ def get_system_resources(use_cache=True):
                         resources['memory']['used'] = used
                         resources['memory']['available'] = total - used
                         resources['memory']['percent'] = round(used / total * 100, 1) if total > 0 else 0
-                    except:
+                    except (TypeError, ValueError):
                         pass
 
         # 尝试获取磁盘信息（Linux）
@@ -2676,7 +3777,8 @@ def get_system_resources(use_cache=True):
             resources['disk']['percent'] = round(used / total * 100, 1) if total > 0 else 0
         except Exception:
             if is_linux() and command_available('df'):
-                _, disk_out, _ = run_cmd(f'df {disk_path} 2>/dev/null | tail -1')
+                _, df_out, _ = run_cmd(['df', disk_path])
+                disk_out = next((line for line in reversed(df_out.splitlines()) if line.strip()), '')
                 if disk_out:
                     parts = disk_out.split()
                     if len(parts) >= 5:
@@ -2713,13 +3815,13 @@ def get_system_resources(use_cache=True):
         # 获取系统负载（Linux）
         try:
             load_avg = psutil.getloadavg()
-        except:
+        except (AttributeError, OSError):
             load_avg = (0, 0, 0)
 
         # 获取进程数
         try:
             process_count = len(psutil.pids())
-        except:
+        except (psutil.Error, OSError):
             process_count = 0
 
         result = {
@@ -2767,7 +3869,7 @@ def get_system_resources(use_cache=True):
             },
             'system': system_info,
             'cliproxy': cliproxy_usage,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': _utc_iso()
         }
         cache.set(cache_key, result)
         return result
@@ -2783,7 +3885,7 @@ def perform_health_check(use_cache=True):
             return cached
 
     results = {
-        'timestamp': datetime.now().isoformat(),
+        'timestamp': _utc_iso(),
         'checks': [],
         'checks_map': {},
         'overall': 'healthy'
@@ -2804,16 +3906,36 @@ def perform_health_check(use_cache=True):
     config, error = load_cliproxy_config()
     config_check = {
         'name': '配置文件',
-        'status': 'pass' if config else 'fail',
-        'message': '配置文件有效' if config else f'配置错误: {error}'
+        'status': 'pass' if config is not None else 'fail',
+        'message': '配置文件有效' if config is not None else f'配置错误: {error}'
     }
     results['checks'].append(config_check)
     results['checks_map']['config'] = config_check
 
+    if isinstance(config, dict) and config.get('usage-statistics-enabled') is False:
+        usage_check = {
+            'name': '用量统计',
+            'status': 'warn',
+            'message': 'CLIProxyAPI 已关闭 usage-statistics-enabled；v7 用量队列不会产生 Token 记录',
+        }
+        results['checks'].append(usage_check)
+        results['checks_map']['usage_statistics'] = usage_check
+
+    log_path = _resolve_panel_path(CONFIG.get('cliproxy_log'))
+    log_ok = bool(log_path and os.path.isfile(log_path) and os.access(log_path, os.R_OK))
+    log_check = {
+        'name': '请求日志',
+        'status': 'pass' if log_ok else 'warn',
+        'message': f'日志可读: {log_path}' if log_ok else f'日志不可用，自动更新将保持等待: {log_path or "未配置"}',
+    }
+    results['checks'].append(log_check)
+    results['checks_map']['log'] = log_check
+
     # 3. 磁盘空间检查
+    disk_path = _resolve_panel_path(CONFIG.get('disk_path') or '/')
     if HAS_PSUTIL:
         try:
-            disk = psutil.disk_usage('/')
+            disk = psutil.disk_usage(disk_path)
             disk_ok = disk.percent < 90
             disk_check = {
                 'name': '磁盘空间',
@@ -2823,7 +3945,7 @@ def perform_health_check(use_cache=True):
             }
             results['checks'].append(disk_check)
             results['checks_map']['disk'] = disk_check
-        except:
+        except (OSError, ValueError):
             disk_check = {
                 'name': '磁盘空间',
                 'status': 'unknown',
@@ -2834,7 +3956,8 @@ def perform_health_check(use_cache=True):
     else:
         # 使用df命令获取磁盘信息（Linux）
         if is_linux() and command_available('df'):
-            _, disk_out, _ = run_cmd('df / 2>/dev/null | tail -1')
+            _, df_out, _ = run_cmd(['df', disk_path])
+            disk_out = next((line for line in reversed(df_out.splitlines()) if line.strip()), '')
             if disk_out:
                 parts = disk_out.split()
                 if len(parts) >= 5:
@@ -2849,7 +3972,7 @@ def perform_health_check(use_cache=True):
                         }
                         results['checks'].append(disk_check)
                         results['checks_map']['disk'] = disk_check
-                    except:
+                    except (TypeError, ValueError):
                         disk_check = {
                             'name': '磁盘空间',
                             'status': 'unknown',
@@ -2895,7 +4018,7 @@ def perform_health_check(use_cache=True):
             }
             results['checks'].append(memory_check)
             results['checks_map']['memory'] = memory_check
-        except:
+        except Exception:
             memory_check = {
                 'name': '内存使用',
                 'status': 'unknown',
@@ -2906,7 +4029,8 @@ def perform_health_check(use_cache=True):
     else:
         # 使用free命令获取内存信息（Linux）
         if is_linux() and command_available('free'):
-            _, mem_out, _ = run_cmd('free 2>/dev/null | grep Mem')
+            _, free_out, _ = run_cmd(['free'])
+            mem_out = next((line for line in free_out.splitlines() if line.lstrip().startswith('Mem:')), '')
             if mem_out:
                 parts = mem_out.split()
                 if len(parts) >= 3:
@@ -2923,7 +4047,7 @@ def perform_health_check(use_cache=True):
                         }
                         results['checks'].append(memory_check)
                         results['checks_map']['memory'] = memory_check
-                    except:
+                    except (TypeError, ValueError):
                         memory_check = {
                             'name': '内存使用',
                             'status': 'unknown',
@@ -2957,14 +4081,17 @@ def perform_health_check(use_cache=True):
             results['checks_map']['memory'] = memory_check
 
     # 5. 认证文件检查
-    auth_dir = CONFIG['auth_dir']
+    auth_dir = _resolve_panel_path(CONFIG.get('auth_dir'))
     if os.path.exists(auth_dir):
-        auth_files = [f for f in os.listdir(auth_dir) if os.path.isfile(os.path.join(auth_dir, f))]
+        try:
+            auth_count = sum(1 for entry in os.scandir(auth_dir) if entry.is_file(follow_symlinks=False))
+        except OSError:
+            auth_count = 0
         auth_check = {
             'name': '认证文件',
-            'status': 'pass' if len(auth_files) > 0 else 'warn',
-            'message': f'找到 {len(auth_files)} 个凭证文件',
-            'details': {'count': len(auth_files)}
+            'status': 'pass' if auth_count > 0 else 'warn',
+            'message': f'找到 {auth_count} 个凭证文件',
+            'details': {'count': auth_count}
         }
         results['checks'].append(auth_check)
         results['checks_map']['auth'] = auth_check
@@ -2979,20 +4106,17 @@ def perform_health_check(use_cache=True):
 
     # 6. API端口检查
     try:
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        result = sock.connect_ex(('127.0.0.1', CONFIG['cliproxy_api_port']))
-        sock.close()
-        port_open = result == 0
+        api_host, api_port = _api_host_port()
+        with socket.create_connection((api_host, api_port), timeout=2):
+            port_open = True
         port_check = {
             'name': 'API端口',
             'status': 'pass' if port_open else 'fail',
-            'message': f'端口 {CONFIG["cliproxy_api_port"]} {"开放" if port_open else "关闭"}'
+            'message': f'{api_host}:{api_port} 可连接'
         }
         results['checks'].append(port_check)
         results['checks_map']['api_port'] = port_check
-    except:
+    except (OSError, ValueError):
         port_check = {
             'name': 'API端口',
             'status': 'unknown',
@@ -3023,11 +4147,21 @@ def perform_health_check(use_cache=True):
     results['checks'].append(management_check)
     results['checks_map']['management_key'] = management_check
 
+    bind_host = str(CONFIG.get('bind_host') or '')
+    exposed_without_key = bind_host not in {'127.0.0.1', '::1', 'localhost'} and not _panel_access_key_expected()
+    security_check = {
+        'name': '面板访问保护',
+        'status': 'warn' if exposed_without_key else 'pass',
+        'message': '面板对外监听但未设置访问密钥' if exposed_without_key else '面板访问范围与密钥配置正常',
+    }
+    results['checks'].append(security_check)
+    results['checks_map']['panel_security'] = security_check
+
     # 计算整体状态
     statuses = [c['status'] for c in results['checks']]
     if 'fail' in statuses:
         results['overall'] = 'unhealthy'
-    elif 'warn' in statuses:
+    elif 'warn' in statuses or 'unknown' in statuses:
         results['overall'] = 'degraded'
     else:
         results['overall'] = 'healthy'
@@ -3041,7 +4175,7 @@ def perform_health_check(use_cache=True):
 def get_models_from_config():
     """从配置中获取模型列表"""
     config, error = load_cliproxy_config()
-    if not config:
+    if config is None:
         return [], error
 
     # 如果没有yaml，无法解析模型
@@ -3050,10 +4184,16 @@ def get_models_from_config():
 
     models = []
     providers = config.get('providers', [])
+    if not isinstance(providers, list):
+        return [], 'providers 必须是列表'
 
     for provider in providers:
+        if not isinstance(provider, dict):
+            continue
         provider_name = provider.get('name', 'unknown')
         provider_models = provider.get('models', [])
+        if not isinstance(provider_models, list):
+            continue
 
         for model in provider_models:
             if isinstance(model, str):
@@ -3072,94 +4212,104 @@ def get_models_from_config():
 
     return models, None
 
+
+def _increment_model_usage_locked(model, amount=1):
+    """Increment a model counter without allowing unbounded key growth."""
+    counters = state['stats'].setdefault('model_usage', {})
+    key = str(model or 'unknown')[:200]
+    if key not in counters and len(counters) >= MAX_MODEL_USAGE_ENTRIES:
+        key = '__other__'
+    counters[key] = max(0, _safe_int(counters.get(key, 0))) + max(0, _safe_int(amount, 0))
+
+
+def update_accumulated_usage(token_totals, usage_reqs, *, live):
+    """Apply one live upstream snapshot exactly once under a single lock."""
+    current = {
+        'input_tokens': max(0, _safe_int(token_totals.get('input_tokens', 0))),
+        'output_tokens': max(0, _safe_int(token_totals.get('output_tokens', 0))),
+        'reasoning_tokens': max(0, _safe_int(token_totals.get('reasoning_tokens', 0))),
+        'cached_tokens': max(0, _safe_int(token_totals.get('cached_tokens', 0))),
+        'total_requests': max(0, _safe_int(usage_reqs.get('total_requests', 0))),
+        'success': max(0, _safe_int(usage_reqs.get('success', 0))),
+        'failure': max(0, _safe_int(usage_reqs.get('failure', 0))),
+    }
+    with stats_lock:
+        accumulated = state.setdefault('accumulated_stats', {}).copy()
+        previous = state.setdefault('last_snapshot', {}).copy()
+        for key in current:
+            accumulated.setdefault(key, 0)
+            previous.setdefault(key, 0)
+
+        if live:
+            reset_pending = bool(state.get('usage_reset_pending', False))
+            if state.get('usage_counter_mode') == 'queue':
+                # The first cumulative payload after a v7 queue period is a
+                # baseline. Adding it would recount queue records already saved.
+                reset_pending = True
+            if not reset_pending:
+                for key, value in current.items():
+                    old_value = max(0, _safe_int(previous.get(key, 0)))
+                    # A lower upstream counter means CLIProxy restarted/reset.
+                    delta = value - old_value if value >= old_value else value
+                    accumulated[key] = max(0, _safe_int(accumulated.get(key, 0))) + max(0, delta)
+            state['last_snapshot'] = current
+            state['accumulated_stats'] = accumulated
+            state['usage_reset_pending'] = False
+            state['usage_counter_mode'] = 'cumulative'
+
+        state['stats']['input_tokens'] = accumulated['input_tokens']
+        state['stats']['output_tokens'] = accumulated['output_tokens']
+        state['stats']['reasoning_tokens'] = accumulated['reasoning_tokens']
+        state['stats']['cached_tokens'] = accumulated['cached_tokens']
+        recorded = state.setdefault('recorded_stats', {})
+        combined = dict(accumulated)
+        combined['total_requests'] += max(0, _safe_int(recorded.get('total_requests', 0)))
+        combined['success'] += max(0, _safe_int(recorded.get('success', 0)))
+        combined['failure'] += max(0, _safe_int(recorded.get('failure', 0)))
+        state['stats']['total_requests'] = combined['total_requests']
+        state['stats']['successful_requests'] = combined['success']
+        state['stats']['failed_requests'] = combined['failure']
+        state['request_count'] = combined['total_requests']
+        return combined
+
 # ==================== API 路由 ====================
 
 @app.route('/')
 def index():
-    return send_from_directory('static', 'index.html')
+    return send_from_directory(app.static_folder, 'index.html')
+
+
+@app.route('/api/healthz')
+def api_healthz():
+    """Minimal unauthenticated liveness endpoint for Docker/systemd probes."""
+    return jsonify({'ok': True, 'panel': PANEL_NAME, 'version': PANEL_VERSION, 'time': _utc_iso()})
+
+
+@app.errorhandler(413)
+def request_too_large(_error):
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'error': 'Request body exceeds the 3 MiB limit'}), 413
+    return 'Request body too large', 413
 
 @app.route('/api/status')
 def api_status():
     service = get_service_status()
-    has_update = check_for_updates()
+    has_update = check_for_updates(allow_network=False)
     log_requests = get_request_count_from_logs()
-    snapshot = fetch_usage_snapshot()
+    # The background collector performs network I/O. Dashboard refreshes only
+    # consume the latest memory/disk snapshot, keeping the UI responsive during
+    # upstream outages.
+    snapshot, snapshot_meta = fetch_usage_snapshot(with_meta=True, allow_network=False)
     token_totals, usage_reqs = aggregate_usage_snapshot(snapshot)
-    pricing, pricing_meta = get_effective_pricing()
-
-    # 获取当前 CLIProxyAPI 的值
-    current_input = token_totals.get('input_tokens', 0)
-    current_output = token_totals.get('output_tokens', 0)
-    current_cached = token_totals.get('cached_tokens', 0)
-    current_requests = usage_reqs.get('total_requests', 0) or 0
-    current_success = usage_reqs.get('success', 0) or 0
-    current_failure = usage_reqs.get('failure', 0) or 0
-
-    # 获取上次快照值
-    last = state.get('last_snapshot', {})
-    last_input = last.get('input_tokens', 0)
-    last_output = last.get('output_tokens', 0)
-    last_cached = last.get('cached_tokens', 0)
-    last_requests = last.get('total_requests', 0)
-    last_success = last.get('success', 0)
-    last_failure = last.get('failure', 0)
-
-    # 计算增量（如果当前值 < 上次值，说明 CLIProxyAPI 重启了，增量就是当前值）
-    if current_input >= last_input:
-        delta_input = current_input - last_input
-    else:
-        delta_input = current_input  # CLIProxyAPI 重启了
-    
-    if current_output >= last_output:
-        delta_output = current_output - last_output
-    else:
-        delta_output = current_output
-    
-    if current_cached >= last_cached:
-        delta_cached = current_cached - last_cached
-    else:
-        delta_cached = current_cached
-    
-    if current_requests >= last_requests:
-        delta_requests = current_requests - last_requests
-    else:
-        delta_requests = current_requests
-    
-    if current_success >= last_success:
-        delta_success = current_success - last_success
-    else:
-        delta_success = current_success
-    
-    if current_failure >= last_failure:
-        delta_failure = current_failure - last_failure
-    else:
-        delta_failure = current_failure
-
-    # 累加到面板的统计数据
-    acc = state.get('accumulated_stats', {})
-    acc['input_tokens'] = acc.get('input_tokens', 0) + delta_input
-    acc['output_tokens'] = acc.get('output_tokens', 0) + delta_output
-    acc['cached_tokens'] = acc.get('cached_tokens', 0) + delta_cached
-    acc['total_requests'] = acc.get('total_requests', 0) + delta_requests
-    acc['success'] = acc.get('success', 0) + delta_success
-    acc['failure'] = acc.get('failure', 0) + delta_failure
-    state['accumulated_stats'] = acc
-
-    # 更新上次快照值
-    state['last_snapshot'] = {
-        'input_tokens': current_input,
-        'output_tokens': current_output,
-        'cached_tokens': current_cached,
-        'total_requests': current_requests,
-        'success': current_success,
-        'failure': current_failure,
-    }
+    pricing, pricing_meta = get_effective_pricing(allow_remote=False)
+    acc = update_accumulated_usage(token_totals, usage_reqs, live=bool(snapshot_meta.get('live')))
 
     # 使用累计值作为显示值
     display_input_tokens = acc['input_tokens']
     display_output_tokens = acc['output_tokens']
+    display_reasoning_tokens = acc['reasoning_tokens']
     display_cached_tokens = acc['cached_tokens']
-    display_total_tokens = display_input_tokens + display_output_tokens
+    display_total_tokens = display_input_tokens + display_output_tokens + display_reasoning_tokens
     display_total_requests = acc['total_requests']
     display_success = acc['success']
     display_failure = acc['failure']
@@ -3168,23 +4318,20 @@ def api_status():
     display_token_totals = {
         'input_tokens': display_input_tokens,
         'output_tokens': display_output_tokens,
+        'reasoning_tokens': display_reasoning_tokens,
         'cached_tokens': display_cached_tokens,
     }
     billable_input_tokens = get_billable_input_tokens(display_token_totals)
     usage_costs = compute_usage_costs(display_token_totals, pricing)
 
-    with stats_lock:
-        state['stats']['input_tokens'] = display_input_tokens
-        state['stats']['output_tokens'] = display_output_tokens
-        state['stats']['cached_tokens'] = display_cached_tokens
-
     # 触发持久化保存
     save_persistent_stats()
 
     # 如果没有从 API 获取到请求数，使用日志统计
-    final_count = display_total_requests if display_total_requests > 0 else log_requests.get('count', 0)
-    final_success = display_success if display_success > 0 else log_requests.get('success', 0)
-    final_failed = display_failure if display_failure > 0 else log_requests.get('failed', 0)
+    has_usage_requests = display_total_requests > 0
+    final_count = display_total_requests if has_usage_requests else log_requests.get('count', 0)
+    final_success = display_success if has_usage_requests else log_requests.get('success', 0)
+    final_failed = display_failure if has_usage_requests else log_requests.get('failed', 0)
     idle_state = get_idle_state(log_requests)
     auto_update_state = get_auto_update_state(has_update=has_update, stats=log_requests)
 
@@ -3208,8 +4355,14 @@ def api_status():
             'input_tokens': display_input_tokens,
             'billable_input_tokens': billable_input_tokens,
             'output_tokens': display_output_tokens,
+            'reasoning_tokens': display_reasoning_tokens,
             'cached_tokens': display_cached_tokens,
             'total_tokens': display_total_tokens,
+            'timezone': log_requests.get('timezone'),
+            'log_available': bool(log_requests.get('log_available', False)),
+            'log_partial': bool(log_requests.get('partial', False)),
+            'log_skipped_bytes': _safe_int(log_requests.get('skipped_bytes', 0)),
+            'idle_reason': idle_state.get('reason'),
         },
         'update': {
             'in_progress': state['update_in_progress'],
@@ -3230,6 +4383,11 @@ def api_status():
         'paths': get_paths_info(),
         'health': state['health_status'],
         'management_auth': _management_auth_snapshot(),
+        'usage_snapshot': {
+            'source': snapshot_meta.get('source'),
+            'live': bool(snapshot_meta.get('live')),
+            'fetched_at': snapshot_meta.get('fetched_at'),
+        },
     })
 
 @app.route('/api/logs')
@@ -3249,25 +4407,29 @@ def api_cliproxy_logs():
 @app.route('/api/cliproxy-logs/clear', methods=['POST'])
 def api_clear_cliproxy_logs():
     """清空 CLIProxy 日志"""
+    if not _parse_bool(CONFIG.get('log_clear_enabled', False)):
+        return jsonify({
+            'success': False,
+            'message': '服务日志清空默认禁用；界面的“清空”只清除当前浏览器显示',
+        }), 403
     log_files = [CONFIG.get('cliproxy_log'), CONFIG.get('cliproxy_stderr')]
     cleared = False
     errors = []
 
     for log_file in log_files:
+        log_file = _resolve_panel_path(log_file)
         if not log_file or not os.path.exists(log_file):
             continue
         try:
             with open(log_file, 'w', encoding='utf-8') as f:
-                f.write('')
+                f.flush()
+                os.fsync(f.fileno())
             cleared = True
         except Exception as e:
             errors.append(f"{log_file}: {e}")
 
     _reset_log_stats_state()
-    try:
-        cache.invalidate('request_count_logs')
-    except Exception:
-        pass
+    cache.invalidate('request_count_logs')
 
     if errors:
         return jsonify({'success': False, 'message': '清空失败', 'errors': errors}), 500
@@ -3295,27 +4457,35 @@ def api_update_history():
     """获取更新历史"""
     history_file = UPDATE_HISTORY_PATH
     try:
-        os.makedirs(os.path.dirname(history_file), exist_ok=True)
-        if os.path.exists(history_file):
-            with open(history_file, 'r', encoding='utf-8') as f:
-                history = json.load(f)
-        else:
-            history = []
+        with update_history_lock:
+            if os.path.exists(history_file):
+                loaded = _load_json_file_limited(history_file, 1024 * 1024)
+                history = loaded if isinstance(loaded, list) else []
+            else:
+                history = []
 
         # 计算每次更新距今多少小时
-        now = datetime.utcnow()
-        for entry in history:
+        now = _utc_now()
+        response_history = []
+        for original in history:
+            if not isinstance(original, dict):
+                continue
+            entry = dict(original)
             try:
-                update_time = datetime.strptime(entry['time'], '%Y-%m-%d %H:%M:%S')
-                hours_ago = (now - update_time).total_seconds() / 3600
-                entry['hours_ago'] = round(hours_ago, 1)
-            except:
+                # Legacy history values were naive UTC strings.
+                update_time = _parse_iso_datetime(entry.get('time'), assume_timezone=UTC)
+                hours_ago = max(0.0, (now - update_time.astimezone(UTC)).total_seconds() / 3600) if update_time else None
+                entry['hours_ago'] = round(hours_ago, 1) if hours_ago is not None else None
+                if update_time:
+                    entry['time'] = _utc_iso(update_time)
+            except (TypeError, ValueError, OverflowError):
                 entry['hours_ago'] = None
             entry['version'] = resolve_version_label(entry.get('version'))
+            response_history.append(entry)
 
         return jsonify({
             'success': True,
-            'history': history[-10:]  # 返回最近10条
+            'history': response_history[-10:]  # 返回最近10条
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -3323,34 +4493,33 @@ def api_update_history():
 def record_update_history(version, success=True):
     """记录更新历史"""
     history_file = UPDATE_HISTORY_PATH
-    try:
-        os.makedirs(os.path.dirname(history_file), exist_ok=True)
-        if os.path.exists(history_file):
-            with open(history_file, 'r', encoding='utf-8') as f:
-                history = json.load(f)
-        else:
-            history = []
+    with update_history_lock:
+        try:
+            if os.path.exists(history_file):
+                loaded = _load_json_file_limited(history_file, 1024 * 1024)
+                history = loaded if isinstance(loaded, list) else []
+            else:
+                history = []
 
-        history.append({
-            'version': version,
-            'time': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
-            'success': success
-        })
-
-        # 只保留最近50条
-        history = history[-50:]
-
-        with open(history_file, 'w', encoding='utf-8') as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
-
-        return True
-    except Exception as e:
-        print(f"Error recording update history: {e}")
-        return False
+            history.append({
+                'version': version,
+                'time': _utc_iso(),
+                'success': bool(success),
+            })
+            _atomic_write_json(history_file, history[-50:], mode=0o600)
+            return True
+        except Exception as e:
+            print(f"Error recording update history: {e}")
+            return False
 
 @app.route('/api/update', methods=['POST'])
 def api_update():
-    force = request.json.get('force', False) if request.json else False
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'message': 'JSON object required'}), 400
+    force = data.get('force', False)
+    if not isinstance(force, bool):
+        return jsonify({'success': False, 'message': 'force must be a boolean'}), 400
 
     if not force and not is_idle():
         return jsonify({
@@ -3358,14 +4527,20 @@ def api_update():
             'message': 'System has active requests. Wait for idle or use force update.'
         }), 400
 
-    if state['update_in_progress']:
+    if not update_lock.acquire(blocking=False):
         return jsonify({'success': False, 'message': 'Update already in progress'}), 400
 
     def do_update():
-        perform_update()
+        perform_update(lock_acquired=True)
 
-    thread = threading.Thread(target=do_update)
-    thread.start()
+    state['update_in_progress'] = True
+    try:
+        thread = threading.Thread(target=do_update, daemon=True)
+        thread.start()
+    except Exception:
+        state['update_in_progress'] = False
+        update_lock.release()
+        raise
 
     return jsonify({'success': True, 'message': 'Update started, please refresh to check status'})
 
@@ -3377,54 +4552,73 @@ def api_service(action):
     if not (is_linux() and command_available('systemctl')):
         return jsonify({'success': False, 'message': 'Service control not supported on this platform'}), 400
 
-    success, stdout, stderr = run_cmd(f'systemctl {action} {CONFIG["cliproxy_service"]}')
+    service_name = _systemd_service_name()
+    if not service_name:
+        return jsonify({'success': False, 'message': 'Invalid or missing service name'}), 400
+    success, stdout, stderr = run_cmd(['systemctl', action, service_name])
+    cache.invalidate('service_status')
     time.sleep(2)
 
-    status = get_service_status()
+    status = get_service_status(use_cache=False)
     return jsonify({'success': success, 'message': stdout or stderr, 'status': status})
 
 @app.route('/api/config/auto-update', methods=['POST'])
 def api_toggle_auto_update():
-    data = request.json or {}
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'error': 'JSON object required'}), 400
     enabled_raw = data.get('enabled', not state['auto_update_enabled'])
     enabled = enabled_raw if isinstance(enabled_raw, bool) else _parse_bool(enabled_raw)
+    if not _update_dotenv_values({'auto_update_enabled': enabled}):
+        return jsonify({'success': False, 'error': '保存 .env 失败'}), 500
     state['auto_update_enabled'] = enabled
     CONFIG['auto_update_enabled'] = enabled
-    _update_dotenv_values({'auto_update_enabled': enabled})
+    auto_update_wakeup.set()
     return jsonify({'success': True, 'auto_update_enabled': state['auto_update_enabled']})
 
 @app.route('/api/config/idle-threshold', methods=['POST'])
 def api_set_idle_threshold():
-    data = request.json or {}
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'error': 'JSON object required'}), 400
     threshold = data.get('threshold', 60)
 
-    if not isinstance(threshold, int) or threshold < 10:
-        return jsonify({'success': False, 'message': 'Threshold must be integer >= 10'}), 400
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or not 10 <= threshold <= 7 * 86400:
+        return jsonify({'success': False, 'message': 'Threshold must be an integer between 10 and 604800 seconds'}), 400
 
+    if not _update_dotenv_values({'idle_threshold_seconds': threshold}):
+        return jsonify({'success': False, 'error': '保存 .env 失败'}), 500
     CONFIG['idle_threshold_seconds'] = threshold
-    _update_dotenv_values({'idle_threshold_seconds': CONFIG['idle_threshold_seconds']})
     return jsonify({'success': True, 'idle_threshold': CONFIG['idle_threshold_seconds']})
 
 @app.route('/api/config/check-interval', methods=['POST'])
 def api_set_check_interval():
     """设置自动更新检查间隔"""
-    data = request.json or {}
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'error': 'JSON object required'}), 400
     interval = data.get('interval', 300)
-    if not isinstance(interval, (int, float)) or interval < 60:
-        return jsonify({'success': False, 'error': 'Invalid interval (min 60 seconds)'}), 400
-    CONFIG['auto_update_check_interval'] = int(interval)
-    _update_dotenv_values({'auto_update_check_interval': CONFIG['auto_update_check_interval']})
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not 60 <= interval <= 86400:
+        return jsonify({'success': False, 'error': 'Invalid interval (60-86400 seconds)'}), 400
+    interval = int(interval)
+    if not _update_dotenv_values({'auto_update_check_interval': interval}):
+        return jsonify({'success': False, 'error': '保存 .env 失败'}), 500
+    CONFIG['auto_update_check_interval'] = interval
+    auto_update_wakeup.set()
     return jsonify({'success': True, 'check_interval': CONFIG['auto_update_check_interval']})
 
 
 @app.route('/api/config/pricing-auto', methods=['POST'])
 def api_set_pricing_auto():
     """开启/关闭 Token 价格自动同步（默认开启；关闭后严格使用手动价格）"""
-    data = request.json or {}
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'error': 'JSON object required'}), 400
     enabled_raw = data.get('enabled', CONFIG.get('pricing_auto_enabled', True))
     enabled = enabled_raw if isinstance(enabled_raw, bool) else _parse_bool(enabled_raw)
+    if not _update_dotenv_values({'pricing_auto_enabled': enabled}):
+        return jsonify({'success': False, 'error': '保存 .env 失败'}), 500
     CONFIG['pricing_auto_enabled'] = enabled
-    _update_dotenv_values({'pricing_auto_enabled': enabled})
     # 返回当前 effective 价格，方便前端立即刷新显示
     effective, pricing_meta = get_effective_pricing()
     return jsonify({
@@ -3439,18 +4633,24 @@ def api_set_pricing_auto():
 @app.route('/api/pricing', methods=['GET', 'POST'])
 def api_pricing():
     if request.method == 'POST':
-        data = request.json or {}
+        data = _request_json_object()
+        if data is None:
+            return jsonify({'success': False, 'error': 'JSON object required'}), 400
         input_price = _parse_float(data.get('input', CONFIG.get('pricing_input', 0.0)))
         output_price = _parse_float(data.get('output', CONFIG.get('pricing_output', 0.0)))
         cache_price = _parse_float(data.get('cache', CONFIG.get('pricing_cache', 0.0)))
-        CONFIG['pricing_input'] = input_price
-        CONFIG['pricing_output'] = output_price
-        CONFIG['pricing_cache'] = cache_price
-        _update_dotenv_values({
+        prices = (input_price, output_price, cache_price)
+        if any(not math.isfinite(value) or value < 0 or value > 1_000_000 for value in prices):
+            return jsonify({'success': False, 'error': '价格必须是 0 到 1000000 之间的有限数字'}), 400
+        if not _update_dotenv_values({
             'pricing_input': input_price,
             'pricing_output': output_price,
             'pricing_cache': cache_price,
-        })
+        }):
+            return jsonify({'success': False, 'error': '保存 .env 失败'}), 500
+        CONFIG['pricing_input'] = input_price
+        CONFIG['pricing_output'] = output_price
+        CONFIG['pricing_cache'] = cache_price
         # 手动保存后，effective 价格也会随之变化（除非仍为 0 且开启自动同步）
         effective, pricing_meta = get_effective_pricing()
         return jsonify({
@@ -3481,10 +4681,17 @@ def api_management_key():
     if request.method == 'GET':
         return jsonify({'success': True, 'management_auth': _management_auth_snapshot()})
 
-    data = request.json or {}
-    key = str(data.get('management_key') or '').strip()
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'error': 'JSON object required'}), 400
+    key_value = data.get('management_key')
+    if not isinstance(key_value, str):
+        return jsonify({'success': False, 'error': 'CPA 管理密钥必须是文本'}), 400
+    key = key_value.strip()
     if not key:
         return jsonify({'success': False, 'error': 'CPA 管理密钥不能为空'}), 400
+    if len(key) > 4096 or any(char in key for char in ('\r', '\n', '\x00')):
+        return jsonify({'success': False, 'error': 'CPA 管理密钥格式无效'}), 400
 
     if not _update_dotenv_values({'management_key': key}):
         return jsonify({'success': False, 'error': '保存 .env 失败'}), 500
@@ -3501,21 +4708,27 @@ def api_management_key():
 @app.route('/api/quote', methods=['GET', 'POST'])
 def api_quote():
     if request.method == 'POST':
-        data = request.json or {}
-        line = (data.get('line') or '').strip()
+        data = _request_json_object()
+        if data is None or not isinstance(data.get('line'), str):
+            return jsonify({'success': False, 'error': 'line 必须是文本'}), 400
+        line = data['line'].strip()
         if not line or '出自：' not in line:
             return jsonify({'success': False, 'error': '格式错误，请使用“内容 出自：作者”'}), 400
-        path = _resolve_panel_path(CONFIG.get('quotes_path'))
+        if '\n' in line or '\r' in line or '\x00' in line or len(line) > 10_000:
+            return jsonify({'success': False, 'error': '语录必须是长度不超过 10000 字的单行文本'}), 400
+        path = _resolve_panel_path(CONFIG.get('quotes_path')) or BUNDLED_QUOTES_PATH
         try:
             parent_dir = os.path.dirname(path)
             if parent_dir:
                 os.makedirs(parent_dir, exist_ok=True)
-            with open(path, 'a', encoding='utf-8') as f:
-                if not line.endswith('\n'):
-                    line = line + '\n'
-                f.write(line)
-            cache.set('quotes_cache', load_quotes())
-            return jsonify({'success': True})
+            with quotes_lock:
+                with open(path, 'a', encoding='utf-8') as f:
+                    f.write(line + '\n')
+                    f.flush()
+                    os.fsync(f.fileno())
+                loaded_quotes = load_quotes()
+                cache.set('quotes_cache', loaded_quotes)
+            return jsonify({'success': True, 'count': len(loaded_quotes)})
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -3524,17 +4737,25 @@ def api_quote():
 
 @app.route('/api/record-request', methods=['POST'])
 def api_record_request():
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'error': 'JSON object required'}), 400
+    model = str(data.get('model') or 'unknown')[:200]
+    status_value = str(data.get('status') or 'unknown')[:40]
+    response_time = _safe_float(data.get('response_time'), 0.0)
+    if not math.isfinite(response_time) or response_time < 0:
+        response_time = 0.0
+
     with log_lock:
         state['last_request_time'] = time.time()
         state['request_count'] += 1
 
-        data = request.json or {}
         state['request_log'].append({
-            'time': datetime.now().isoformat(),
-            'model': data.get('model', 'unknown'),
+            'time': _utc_iso(),
+            'model': model,
             'client': request.remote_addr,
-            'status': data.get('status', 'unknown'),
-            'response_time': data.get('response_time', 0)
+            'status': status_value,
+            'response_time': response_time,
         })
 
         if len(state['request_log']) > 100:
@@ -3543,13 +4764,18 @@ def api_record_request():
         # 更新统计
         with stats_lock:
             state['stats']['total_requests'] += 1
-            if data.get('status') == 'success':
+            recorded = state.setdefault('recorded_stats', {
+                'total_requests': 0, 'success': 0, 'failure': 0,
+            })
+            recorded['total_requests'] = max(0, _safe_int(recorded.get('total_requests', 0))) + 1
+            if status_value == 'success':
                 state['stats']['successful_requests'] += 1
+                recorded['success'] = max(0, _safe_int(recorded.get('success', 0))) + 1
             else:
                 state['stats']['failed_requests'] += 1
+                recorded['failure'] = max(0, _safe_int(recorded.get('failure', 0))) + 1
 
-            model = data.get('model', 'unknown')
-            state['stats']['model_usage'][model] = state['stats']['model_usage'].get(model, 0) + 1
+            _increment_model_usage_locked(model)
 
     # 触发持久化保存（后台线程会定期保存，这里只是触发检查）
     save_persistent_stats()
@@ -3566,7 +4792,9 @@ def api_request_history():
 
 @app.route('/api/check-update')
 def api_check_update():
-    has_update = check_for_updates()
+    cache.invalidate('github_release')
+    cache.invalidate('update_check_details')
+    has_update = check_for_updates(use_cache=False)
     return jsonify({
         'has_update': has_update,
         'current': state['current_version'],
@@ -3575,32 +4803,59 @@ def api_check_update():
 
 @app.route('/api/auth-files')
 def api_auth_files():
-    auth_dir = CONFIG['auth_dir']
+    auth_dir = _resolve_panel_path(CONFIG.get('auth_dir'))
     if not os.path.exists(auth_dir):
         return jsonify({'files': [], 'error': 'Auth directory not found'})
 
     try:
         files = []
-        for f in os.listdir(auth_dir):
+        for f in sorted(os.listdir(auth_dir))[:1000]:
             filepath = os.path.join(auth_dir, f)
             if os.path.isfile(filepath):
                 stat = os.stat(filepath)
                 files.append({
                     'name': f,
                     'size': stat.st_size,
-                    'modified': datetime.fromtimestamp(stat.st_mtime).isoformat()
+                    'modified': _utc_iso(datetime.fromtimestamp(stat.st_mtime, tz=UTC))
                 })
         return jsonify({'files': files, 'path': auth_dir})
     except Exception as e:
         return jsonify({'files': [], 'error': str(e)})
 
+
+def _save_cliproxy_config_content(content):
+    if not isinstance(content, str):
+        return False, 'Config content must be text', None
+    if len(content.encode('utf-8')) > 2 * 1024 * 1024:
+        return False, 'Config file exceeds the 2 MiB limit', None
+    validation = validate_yaml_config(content)
+    if not validation.get('valid'):
+        errors = '; '.join(validation.get('errors') or ['invalid YAML'])
+        return False, errors, None
+
+    config_path = _resolve_panel_path(CONFIG.get('cliproxy_config'))
+    if not config_path:
+        return False, 'Config path is not set', None
+    backup_path = config_path + '.bak'
+    try:
+        if os.path.isfile(config_path):
+            shutil.copy2(config_path, backup_path)
+        _atomic_write_text(config_path, content)
+        cache.invalidate('cliproxy_config')
+        cache.invalidate('health_check')
+        return True, None, backup_path if os.path.exists(backup_path) else None
+    except Exception as exc:
+        return False, str(exc), None
+
 @app.route('/api/config', methods=['GET'])
 def api_get_config():
-    config_path = CONFIG['cliproxy_config']
+    config_path = _resolve_panel_path(CONFIG.get('cliproxy_config'))
     if not os.path.exists(config_path):
         return jsonify({'success': False, 'error': 'Config file not found', 'path': config_path}), 404
 
     try:
+        if os.path.getsize(config_path) > 2 * 1024 * 1024:
+            return jsonify({'success': False, 'error': 'Config file exceeds the 2 MiB limit'}), 413
         with open(config_path, 'r', encoding='utf-8') as f:
             content = f.read()
         return jsonify({'success': True, 'content': content, 'path': config_path})
@@ -3612,7 +4867,7 @@ def api_upload_config():
     if not is_config_write_enabled():
         return config_write_blocked_response()
 
-    config_path = CONFIG['cliproxy_config']
+    config_path = _resolve_panel_path(CONFIG.get('cliproxy_config'))
 
     if 'file' in request.files:
         file = request.files['file']
@@ -3620,32 +4875,28 @@ def api_upload_config():
             return jsonify({'success': False, 'error': 'No file selected'}), 400
 
         try:
-            backup_path = config_path + '.bak'
-            if os.path.exists(config_path):
-                import shutil
-                shutil.copy2(config_path, backup_path)
-
-            file.save(config_path)
+            raw = file.stream.read(2 * 1024 * 1024 + 1)
+            if len(raw) > 2 * 1024 * 1024:
+                return jsonify({'success': False, 'error': 'Config file exceeds the 2 MiB limit'}), 413
+            content = raw.decode('utf-8')
+            success, error, backup_path = _save_cliproxy_config_content(content)
+            if not success:
+                return jsonify({'success': False, 'error': error}), 400
             return jsonify({
                 'success': True,
                 'message': 'Config uploaded successfully',
                 'path': config_path,
                 'backup': backup_path
             })
-        except Exception as e:
+        except (OSError, UnicodeDecodeError) as e:
             return jsonify({'success': False, 'error': str(e)}), 500
 
-    data = request.json
+    data = _request_json_object()
     if data and 'content' in data:
         try:
-            backup_path = config_path + '.bak'
-            if os.path.exists(config_path):
-                import shutil
-                shutil.copy2(config_path, backup_path)
-
-            with open(config_path, 'w', encoding='utf-8') as f:
-                f.write(data['content'])
-
+            success, error, backup_path = _save_cliproxy_config_content(data['content'])
+            if not success:
+                return jsonify({'success': False, 'error': error}), 400
             return jsonify({
                 'success': True,
                 'message': 'Config saved successfully',
@@ -3662,15 +4913,18 @@ def api_restore_config():
     if not is_config_write_enabled():
         return config_write_blocked_response()
 
-    config_path = CONFIG['cliproxy_config']
+    config_path = _resolve_panel_path(CONFIG.get('cliproxy_config'))
     backup_path = config_path + '.bak'
 
     if not os.path.exists(backup_path):
         return jsonify({'success': False, 'error': 'No backup file found'}), 404
 
     try:
-        import shutil
-        shutil.copy2(backup_path, config_path)
+        with open(backup_path, 'r', encoding='utf-8') as handle:
+            content = handle.read()
+        _atomic_write_text(config_path, content)
+        cache.invalidate('cliproxy_config')
+        cache.invalidate('health_check')
         return jsonify({
             'success': True,
             'message': 'Config restored from backup',
@@ -3684,12 +4938,14 @@ def api_restore_config():
 @app.route('/api/config/validate', methods=['POST'])
 def api_validate_config():
     """验证配置文件格式"""
-    data = request.json or {}
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'error': 'JSON object required'}), 400
     content = data.get('content', '')
 
     if not content:
         # 验证当前配置文件
-        config_path = CONFIG['cliproxy_config']
+        config_path = _resolve_panel_path(CONFIG.get('cliproxy_config'))
         if not os.path.exists(config_path):
             return jsonify({'success': False, 'error': 'Config file not found'}), 404
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -3701,28 +4957,33 @@ def api_validate_config():
 @app.route('/api/config/reload', methods=['POST'])
 def api_reload_config():
     """重新加载配置（发送SIGHUP信号）"""
-    if not command_available('pgrep'):
-        return jsonify({'success': False, 'message': 'Reload not supported on this platform'}), 400
-
-    _, pid_out, _ = run_cmd('pgrep -f "cliproxy -config" | head -1')
+    service_status = get_service_status(use_cache=False)
+    pid_out = service_status.get('pid')
 
     if not pid_out:
         return jsonify({'success': False, 'message': '服务未运行'}), 400
 
     try:
-        if command_available('kill'):
-            success, stdout, stderr = run_cmd(f'kill -HUP {pid_out}')
-        else:
-            success, stdout, stderr = (False, '', 'kill not available')
+        success = False
+        if hasattr(signal, 'SIGHUP'):
+            try:
+                os.kill(int(pid_out), signal.SIGHUP)
+                success = True
+            except (OSError, TypeError, ValueError):
+                success = False
 
         if success:
             return jsonify({'success': True, 'message': '配置重载信号已发送'})
         else:
             # 如果SIGHUP不支持，尝试重启服务（Linux/systemd）
             if is_linux() and command_available('systemctl'):
-                run_cmd(f'systemctl restart {CONFIG["cliproxy_service"]}')
+                service_name = _systemd_service_name()
+                if not service_name:
+                    return jsonify({'success': False, 'message': 'Invalid or missing service name'}), 400
+                run_cmd(['systemctl', 'restart', service_name])
+                cache.invalidate('service_status')
                 time.sleep(2)
-                status = get_service_status()
+                status = get_service_status(use_cache=False)
                 return jsonify({
                     'success': status['running'],
                     'message': '已重启服务以应用配置',
@@ -3737,7 +4998,7 @@ def api_reload_config():
 def api_get_routing():
     """获取当前路由策略"""
     config, error = load_cliproxy_config()
-    if not config:
+    if config is None:
         return jsonify({'success': False, 'error': error}), 500
 
     # 如果没有yaml，返回默认值
@@ -3765,16 +5026,18 @@ def api_set_routing():
     if not HAS_YAML:
         return jsonify({'success': False, 'error': 'pyyaml未安装，无法修改配置'}), 400
 
-    data = request.json or {}
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'error': 'JSON object required'}), 400
     strategy = data.get('strategy')
 
     valid_strategies = ['round-robin', 'fill-first']
     if strategy not in valid_strategies:
         return jsonify({'success': False, 'error': f'无效的策略，可选: {", ".join(valid_strategies)}'}), 400
 
-    config_path = CONFIG['cliproxy_config']
+    config_path = _resolve_panel_path(CONFIG.get('cliproxy_config'))
     config, error = load_cliproxy_config()
-    if not config:
+    if config is None:
         return jsonify({'success': False, 'error': error}), 500
 
     # 更新路由策略
@@ -3784,14 +5047,15 @@ def api_set_routing():
 
     try:
         # 备份
-        import shutil
         backup_path = config_path + '.bak'
         if os.path.exists(config_path):
             shutil.copy2(config_path, backup_path)
 
         # 写入新配置
-        with open(config_path, 'w', encoding='utf-8') as f:
-            yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+        content = yaml.safe_dump(config, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        _atomic_write_text(config_path, content)
+        cache.invalidate('cliproxy_config')
+        cache.invalidate('health_check')
 
         return jsonify({'success': True, 'message': f'路由策略已设置为 {strategy}'})
     except Exception as e:
@@ -3819,6 +5083,11 @@ def api_stats():
             'successful_requests': state['stats']['successful_requests'],
             'failed_requests': state['stats']['failed_requests'],
             'success_rate': (state['stats']['successful_requests'] / max(state['stats']['total_requests'], 1)) * 100,
+            'input_tokens': state['stats']['input_tokens'],
+            'output_tokens': state['stats']['output_tokens'],
+            'reasoning_tokens': state['stats']['reasoning_tokens'],
+            'cached_tokens': state['stats']['cached_tokens'],
+            'usage_counter_mode': state.get('usage_counter_mode', 'cumulative'),
             'model_usage': dict(state['stats']['model_usage']),
             'error_types': dict(state['stats']['error_types']),
             'request_log': state['request_log'][-20:],
@@ -3830,94 +5099,88 @@ def api_stats():
 def api_clear_stats():
     """清空请求统计（清空累计值，更新快照为当前值）"""
     # 先获取当前 CLIProxyAPI 的值，作为新的快照起点
-    snapshot = fetch_usage_snapshot(use_cache=False)
+    snapshot, snapshot_meta = fetch_usage_snapshot(use_cache=False, with_meta=True)
     token_totals, usage_reqs = aggregate_usage_snapshot(snapshot)
 
-    # 更新快照为当前值（这样下次计算增量时从0开始）
-    state['last_snapshot'] = {
-        'input_tokens': token_totals.get('input_tokens', 0),
-        'output_tokens': token_totals.get('output_tokens', 0),
-        'cached_tokens': token_totals.get('cached_tokens', 0),
-        'total_requests': usage_reqs.get('total_requests', 0) or 0,
-        'success': usage_reqs.get('success', 0) or 0,
-        'failure': usage_reqs.get('failure', 0) or 0,
-    }
-
-    # 清空累计统计值
-    state['accumulated_stats'] = {
-        'input_tokens': 0,
-        'output_tokens': 0,
-        'cached_tokens': 0,
-        'total_requests': 0,
-        'success': 0,
-        'failure': 0,
-    }
-
-    with stats_lock:
-        state['stats']['total_requests'] = 0
-        state['stats']['successful_requests'] = 0
-        state['stats']['failed_requests'] = 0
-        state['stats']['input_tokens'] = 0
-        state['stats']['output_tokens'] = 0
-        state['stats']['cached_tokens'] = 0
-        state['stats']['model_usage'].clear()
-        state['stats']['error_types'].clear()
-        state['request_log'].clear()
-        state['request_count'] = 0
+    with log_lock:
+        with stats_lock:
+            if snapshot is not None and snapshot_meta.get('live'):
+                state['last_snapshot'] = {
+                    'input_tokens': token_totals.get('input_tokens', 0),
+                    'output_tokens': token_totals.get('output_tokens', 0),
+                    'reasoning_tokens': token_totals.get('reasoning_tokens', 0),
+                    'cached_tokens': token_totals.get('cached_tokens', 0),
+                    'total_requests': usage_reqs.get('total_requests', 0) or 0,
+                    'success': usage_reqs.get('success', 0) or 0,
+                    'failure': usage_reqs.get('failure', 0) or 0,
+                }
+                state['usage_reset_pending'] = False
+                state['usage_counter_mode'] = 'cumulative'
+            elif snapshot_meta.get('source') == 'queue':
+                state['last_snapshot'] = {
+                    'input_tokens': 0,
+                    'output_tokens': 0,
+                    'reasoning_tokens': 0,
+                    'cached_tokens': 0,
+                    'total_requests': 0,
+                    'success': 0,
+                    'failure': 0,
+                }
+                state['usage_reset_pending'] = False
+                state['usage_counter_mode'] = 'queue'
+            else:
+                state['usage_reset_pending'] = True
+            state['accumulated_stats'] = {
+                'input_tokens': 0,
+                'output_tokens': 0,
+                'reasoning_tokens': 0,
+                'cached_tokens': 0,
+                'total_requests': 0,
+                'success': 0,
+                'failure': 0,
+            }
+            state['recorded_stats'] = {
+                'total_requests': 0,
+                'success': 0,
+                'failure': 0,
+            }
+            state['stats']['total_requests'] = 0
+            state['stats']['successful_requests'] = 0
+            state['stats']['failed_requests'] = 0
+            state['stats']['input_tokens'] = 0
+            state['stats']['output_tokens'] = 0
+            state['stats']['reasoning_tokens'] = 0
+            state['stats']['cached_tokens'] = 0
+            state['stats']['model_usage'].clear()
+            state['stats']['error_types'].clear()
+            state['request_log'].clear()
+            state['request_count'] = 0
 
     # 保存清空后的状态到持久化文件
     save_persistent_stats(force=True)
 
-    # 清空 usage_snapshot.json
-    usage_path = CONFIG.get('usage_snapshot_path')
-    if usage_path and os.path.exists(usage_path):
-        try:
-            os.remove(usage_path)
-        except Exception as e:
-            print(f"Error removing usage snapshot: {e}")
-
     # 清除所有缓存
-    try:
-        cache.invalidate()
-    except Exception:
-        pass
+    cache.invalidate()
 
-    # 清空日志文件中的请求记录
-    log_file = CONFIG['cliproxy_log']
-    try:
-        if os.path.exists(log_file):
-            # 备份并清空日志
-            backup_file = log_file + '.bak'
-            import shutil
-            shutil.copy2(log_file, backup_file)
-            # 清空日志文件
-            with open(log_file, 'w', encoding='utf-8') as f:
-                f.write('')
-            _reset_log_stats_state()
-    except Exception as e:
-        print(f"Error clearing log file: {e}")
+    # 统计归零不再复制/截断可能很大的服务日志；从当前 EOF 重新计数即可。
+    _reset_log_stats_state(start_at_end=True)
 
     return jsonify({'success': True, 'message': '统计数据已清空'})
 
 @app.route('/api/models')
 def api_models():
     """获取模型列表"""
-    base_url = CONFIG.get('cliproxy_api_base', 'http://127.0.0.1').rstrip('/')
-    api_port = CONFIG.get('cliproxy_api_port')
     api_key = CONFIG.get('models_api_key', '')
-
-    if api_port:
-        base_url = f'{base_url}:{api_port}'
-
-    models_url = f'{base_url}/v1/models'
     headers = {'Content-Type': 'application/json'}
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
 
     try:
-        resp = requests.get(models_url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        payload = resp.json()
+        base_url = _compose_api_base_url()
+        models_url = f'{base_url}/v1/models'
+        with http_session.get(models_url, headers=headers, timeout=10, stream=True) as resp:
+            resp.raise_for_status()
+            payload = _response_json_limited(resp, 8 * 1024 * 1024)
         models = payload.get('data', []) if isinstance(payload, dict) else []
         return jsonify({'success': True, 'models': models, 'count': len(models)})
     except Exception as e:
@@ -3926,7 +5189,9 @@ def api_models():
 @app.route('/api/test/connection', methods=['POST'])
 def api_test_connection():
     """测试连接"""
-    data = request.json or {}
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'error': 'JSON object required'}), 400
     target = data.get('target', 'api')
 
     results = {'success': True, 'tests': []}
@@ -3934,19 +5199,17 @@ def api_test_connection():
     if target in ['api', 'all']:
         # 测试API端口
         try:
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
+            api_host, api_port = _api_host_port()
             start = time.time()
-            result = sock.connect_ex(('127.0.0.1', CONFIG['cliproxy_api_port']))
+            with socket.create_connection((api_host, api_port), timeout=5):
+                pass
             latency = (time.time() - start) * 1000
-            sock.close()
 
             results['tests'].append({
                 'name': 'API端口',
-                'success': result == 0,
-                'latency': f'{latency:.1f}ms' if result == 0 else None,
-                'message': f'端口 {CONFIG["cliproxy_api_port"]} 正常' if result == 0 else '连接失败'
+                'success': True,
+                'latency': f'{latency:.1f}ms',
+                'message': f'{api_host}:{api_port} 正常',
             })
         except Exception as e:
             results['tests'].append({
@@ -3956,21 +5219,24 @@ def api_test_connection():
             })
 
     if target in ['internet', 'all']:
-        # 测试外网连接
+        # 直接测试自动更新依赖的 GitHub，而不是容易被网络策略屏蔽的公共 DNS 端口。
         try:
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
             start = time.time()
-            result = sock.connect_ex(('8.8.8.8', 53))
+            response = http_session.get(
+                'https://github.com/router-for-me/CLIProxyAPI/releases/latest',
+                timeout=8,
+                allow_redirects=False,
+                stream=True,
+            )
             latency = (time.time() - start) * 1000
-            sock.close()
+            reachable = response.status_code < 500
+            response.close()
 
             results['tests'].append({
-                'name': '外网连接',
-                'success': result == 0,
-                'latency': f'{latency:.1f}ms' if result == 0 else None,
-                'message': '网络正常' if result == 0 else '无法连接外网'
+                'name': 'GitHub 更新源',
+                'success': reachable,
+                'latency': f'{latency:.1f}ms' if reachable else None,
+                'message': '更新源可访问' if reachable else f'更新源返回 HTTP {response.status_code}',
             })
         except Exception as e:
             results['tests'].append({
@@ -3987,65 +5253,63 @@ def api_test_connection():
 @app.route('/api/test/api', methods=['POST'])
 def api_test_api():
     """API测试器"""
-    data = request.json or {}
-    endpoint = data.get('endpoint', '/v1/models')
-    method = data.get('method', 'GET')
+    data = _request_json_object()
+    if data is None:
+        return jsonify({'success': False, 'error': 'JSON object required'}), 400
+    endpoint = str(data.get('endpoint', '/v1/models') or '')
+    method = str(data.get('method', 'GET') or 'GET').upper()
     body = data.get('body')
     headers = data.get('headers', {})
 
-    base_url = f'http://127.0.0.1:{CONFIG["cliproxy_api_port"]}'
-    url = base_url + endpoint
+    if method not in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'}:
+        return jsonify({'success': False, 'error': '不支持的 HTTP 方法'}), 400
+    if not endpoint.startswith('/') or endpoint.startswith('//') or '://' in endpoint or len(endpoint) > 2048:
+        return jsonify({'success': False, 'error': 'endpoint 必须是长度不超过 2048 的相对路径'}), 400
+    if not isinstance(headers, dict) or len(headers) > 50:
+        return jsonify({'success': False, 'error': 'headers 必须是最多包含 50 项的对象'}), 400
+    safe_headers = {}
+    for key, value in headers.items():
+        key_text = str(key)
+        value_text = str(value)
+        if any(char in key_text + value_text for char in ('\r', '\n', '\x00')):
+            return jsonify({'success': False, 'error': '请求头包含非法字符'}), 400
+        safe_headers[key_text] = value_text
 
     try:
-        import urllib.request
-        import urllib.error
-
+        base_url = _compose_api_base_url()
+        url = base_url + endpoint
         start_time = time.time()
-
-        req_data = json.dumps(body).encode() if body else None
-        req = urllib.request.Request(url, data=req_data, method=method)
-
-        for key, value in headers.items():
-            req.add_header(key, value)
-
-        if body:
-            req.add_header('Content-Type', 'application/json')
-
+        response = http_session.request(
+            method,
+            url,
+            headers=safe_headers,
+            json=body if body is not None else None,
+            timeout=30,
+            allow_redirects=False,
+            stream=True,
+        )
+        response_time = (time.time() - start_time) * 1000
+        raw_body = response.raw.read(2 * 1024 * 1024 + 1, decode_content=True)
+        truncated = len(raw_body) > 2 * 1024 * 1024
+        raw_body = raw_body[:2 * 1024 * 1024]
+        response_body = raw_body.decode(response.encoding or 'utf-8', errors='replace')
+        response.close()
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                response_time = (time.time() - start_time) * 1000
-                response_body = response.read().decode('utf-8')
-
-                try:
-                    response_json = json.loads(response_body)
-                except:
-                    response_json = None
-
-                return jsonify({
-                    'success': True,
-                    'status': response.status,
-                    'response_time': f'{response_time:.1f}ms',
-                    'headers': dict(response.headers),
-                    'body': response_json if response_json else response_body[:2000]
-                })
-        except urllib.error.HTTPError as e:
-            response_time = (time.time() - start_time) * 1000
-            return jsonify({
-                'success': False,
-                'status': e.code,
-                'response_time': f'{response_time:.1f}ms',
-                'error': str(e),
-                'body': e.read().decode('utf-8')[:1000] if e.fp else None
-            })
-        except urllib.error.URLError as e:
-            return jsonify({
-                'success': False,
-                'error': f'连接失败: {str(e.reason)}'
-            })
-    except Exception as e:
+            response_json = json.loads(response_body)
+        except (TypeError, ValueError):
+            response_json = None
+        return jsonify({
+            'success': response.ok,
+            'status': response.status_code,
+            'response_time': f'{response_time:.1f}ms',
+            'headers': dict(response.headers),
+            'body': response_json if response_json is not None else response_body[:2000],
+            'truncated': truncated,
+        })
+    except requests.RequestException as e:
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': f'连接失败: {e}'
         })
 
 @app.route('/api/export/<data_type>')
@@ -4057,13 +5321,13 @@ def api_export(data_type):
         return Response(
             content,
             mimetype='application/json',
-            headers={'Content-Disposition': f'attachment; filename=logs_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'}
+            headers={'Content-Disposition': f'attachment; filename=logs_{_utc_now().strftime("%Y%m%d_%H%M%S")}_UTC.json'}
         )
 
     elif data_type == 'stats':
         with stats_lock:
             stats = {
-                'exported_at': datetime.now().isoformat(),
+                'exported_at': _utc_iso(),
                 'total_requests': state['stats']['total_requests'],
                 'successful_requests': state['stats']['successful_requests'],
                 'failed_requests': state['stats']['failed_requests'],
@@ -4073,18 +5337,18 @@ def api_export(data_type):
         return Response(
             content,
             mimetype='application/json',
-            headers={'Content-Disposition': f'attachment; filename=stats_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'}
+            headers={'Content-Disposition': f'attachment; filename=stats_{_utc_now().strftime("%Y%m%d_%H%M%S")}_UTC.json'}
         )
 
     elif data_type == 'config':
-        config_path = CONFIG['cliproxy_config']
+        config_path = _resolve_panel_path(CONFIG.get('cliproxy_config'))
         if os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             return Response(
                 content,
                 mimetype='application/x-yaml',
-                headers={'Content-Disposition': f'attachment; filename=config_{datetime.now().strftime("%Y%m%d_%H%M%S")}.yaml'}
+                headers={'Content-Disposition': f'attachment; filename=config_{_utc_now().strftime("%Y%m%d_%H%M%S")}_UTC.yaml'}
             )
         return jsonify({'error': 'Config not found'}), 404
 
@@ -4094,7 +5358,7 @@ def api_export(data_type):
         return Response(
             content,
             mimetype='application/json',
-            headers={'Content-Disposition': f'attachment; filename=health_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'}
+            headers={'Content-Disposition': f'attachment; filename=health_{_utc_now().strftime("%Y%m%d_%H%M%S")}_UTC.json'}
         )
 
     return jsonify({'error': 'Unknown data type'}), 400
@@ -4102,56 +5366,73 @@ def api_export(data_type):
 # 启动后台任务
 def background_tasks():
     """后台任务：定期健康检查和资源监控"""
+    next_pricing_refresh = 0.0
     while True:
         try:
             perform_health_check()
             get_request_count_from_logs()
+            if time.monotonic() >= next_pricing_refresh:
+                get_effective_pricing(allow_remote=True)
+                next_pricing_refresh = time.monotonic() + 6 * 3600
         except Exception as e:
-            print(f'[{datetime.now()}] Health check failed: {e}')
+            print(f'[{_utc_iso()}] Health check failed: {e}')
         time.sleep(60)
 
-if __name__ == '__main__':
-    state['current_version'] = get_current_commit()
 
-    # 确保 data 目录存在
+runtime_lock = threading.Lock()
+runtime_started = False
+
+
+def initialize_runtime():
+    global runtime_started
+    with runtime_lock:
+        if runtime_started:
+            return
+        runtime_started = True
+
     os.makedirs(DATA_DIR, exist_ok=True)
-
-    # 加载持久化统计数据（最重要的，放在最前面）
     load_persistent_stats()
-    # 立即保存一次，确保文件存在
     save_persistent_stats(force=True)
-
     load_log_stats_state()
-    try:
-        get_request_count_from_logs()
-        save_log_stats_state(force=True)
-    except Exception as e:
-        print(f"Warning: failed to initialize log stats: {e}")
-
-    # 启动资源监控器（非阻塞CPU监控）
     resource_monitor.start()
+    atexit.register(save_persistent_stats, force=True)
+    atexit.register(save_log_stats_state, force=True)
 
-    # 启动自动更新线程
-    auto_thread = threading.Thread(target=auto_update_worker, daemon=True)
-    auto_thread.start()
+    cliproxy_binary = _resolve_panel_path(CONFIG.get('cliproxy_binary'))
+    if cliproxy_binary and os.path.lexists(cliproxy_binary):
+        cliproxy_binary = os.path.realpath(cliproxy_binary)
+    if cliproxy_binary:
+        cleanup_binary_backups(cliproxy_binary)
 
-    # 启动后台任务线程
-    bg_thread = threading.Thread(target=background_tasks, daemon=True)
-    bg_thread.start()
+    threads = [
+        threading.Thread(target=auto_update_worker, daemon=True, name='cpa-auto-update'),
+        threading.Thread(target=background_tasks, daemon=True, name='cpa-background'),
+        threading.Thread(target=_usage_snapshot_worker, daemon=True, name='cpa-usage-snapshot'),
+        threading.Thread(target=_persistent_stats_worker, daemon=True, name='cpa-stats-persist'),
+    ]
+    for thread in threads:
+        thread.start()
 
-    # 启动 usage 持久化线程
-    start_usage_snapshot_worker()
-
-    # 启动统计数据持久化线程
-    start_persistent_stats_worker()
-
-    # 预加载语录并做数量检查
     quotes = load_quotes()
     if quotes:
         cache.set('quotes_cache', quotes)
-        author_count = len({q.get('author') for q in quotes if q.get('author')})
-        if len(quotes) < 300 or author_count < 30:
-            print(f"Warning: quotes count {len(quotes)}, authors {author_count}")
+        if len(quotes) < 181:
+            print(f'Warning: only {len(quotes)} bundled quotes were loaded')
 
-    print(f'{PANEL_NAME} Panel v{PANEL_VERSION} started on port {CONFIG["panel_port"]}')
-    app.run(host=str(CONFIG.get('bind_host', '0.0.0.0') or '0.0.0.0'), port=CONFIG['panel_port'], debug=False)
+if __name__ == '__main__':
+    initialize_runtime()
+    bind_host = str(CONFIG.get('bind_host') or '0.0.0.0')
+    panel_port = int(CONFIG['panel_port'])
+    print(f'{PANEL_NAME} Panel v{PANEL_VERSION} started on {bind_host}:{panel_port}')
+    if HAS_WAITRESS:
+        waitress_serve(
+            app,
+            host=bind_host,
+            port=panel_port,
+            threads=max(4, min(16, (os.cpu_count() or 2) * 2)),
+            channel_timeout=30,
+            clear_untrusted_proxy_headers=True,
+        )
+    else:
+        print('Warning: waitress is unavailable; using the Flask development server')
+        app.run(host=bind_host, port=panel_port, debug=False, threaded=True)

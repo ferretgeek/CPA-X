@@ -1,15 +1,17 @@
-# CPA-X 管理面板（v2.1.2）
+# CPA-X 管理面板（v2.2.0）
 
 [English](README.md) | 中文
 
 一个用于 **CLIProxyAPI** 的监控与管理面板，支持健康检查、资源监控、日志查看、更新管理、请求统计与定价显示等功能。
+
+v2.2.0 重点解决跨地区部署与长期运行问题：CLIProxy 无偏移日志会统一转换为 UTC API 时间，`auto` 模式可在面板容器与宿主机时区不同的情况下推断日志偏移；自动更新会先在线下载/校验或隔离构建，再用最短停机窗口原子替换，并受数量、天数、总大小三重备份上限保护。
 
 > 当前安全策略：**前端已移除所有导出入口，主配置写回默认关闭**；配置区仅保留查看/校验能力，如确需恢复写回，必须在 `.env` 中显式设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`。
 
 > **AI 优先**：本仓库主要面向 AI Agent 部署/运维（而不是人类手动部署）。
 > - AI 部署手册：`AI_DEPLOY_CN.md`
 > - Agent 指引：`AGENTS.md`
-> - 更新说明：`RELEASE_NOTES_v2.1.2.md`
+> - 更新说明：`RELEASE_NOTES_v2.2.0.md`
 
 ## 预览图
 
@@ -74,10 +76,12 @@ cp .env.example .env
 - `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `CLIPROXY_PANEL_CLIPROXY_API_PORT`
 - `CLIPROXY_PANEL_MANAGEMENT_KEY` / `CLIPROXY_PANEL_MODELS_API_KEY`（如上游启用了密钥）
 - `CLIPROXY_PANEL_CLIPROXY_SERVICE` / `CLIPROXY_PANEL_CLIPROXY_BINARY`（自动更新需要）
+- `CLIPROXY_PANEL_LOG_TIMEZONE`（默认 `auto`；也支持 `UTC`、`+08:00`、`Asia/Shanghai` 等）
+- `CLIPROXY_PANEL_BACKUP_*` / `CLIPROXY_PANEL_UPDATE_REQUIRE_CHECKSUM`（备份上限与更新校验策略）
 - `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED`（默认 `false`；只在你明确接受风险时才开启主配置写回）
 - `CLIPROXY_PANEL_GITHUB_TOKEN`（可选：提高 GitHub 限流额度，减少 `latest=unknown`）
 - `CLIPROXY_PANEL_PRICING_*`（可选：费用估算；默认支持自动同步 OpenRouter 定价，可用 `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false` 关闭）
-- `CLIPROXY_PANEL_QUOTES_PATH`（可选：名人语录库；默认使用项目根目录 `X.txt`，仓库已附带）
+- `CLIPROXY_PANEL_QUOTES_PATH`（可选扩展语录库；仓库根目录的 `X.txt` 始终强制加载，当前共 181 条）
 
 ### 4) 启动面板
 ```bash
@@ -110,8 +114,10 @@ docker compose up -d --build
 ### 1) 页面能打开但数据为空
 检查 CLIProxy 是否在运行，并确认 `.env` 中的 `CLIPROXY_PANEL_CLIPROXY_API_BASE/PORT` 指向正确。
 
+CLIProxyAPI v7 使用短期保留的 `/v0/management/usage-queue`，CPA-X 会自动识别并每 15 秒消费、持久化；请在 CLIProxyAPI 的 `config.yaml` 中设置 `usage-statistics-enabled: true`，否则不会产生 Token 用量记录。v6 的累计用量接口仍兼容。
+
 ### 2) 健康检查超时
-`/api/status` 会触发更多检查，首次可能稍慢；可先用 `/api/resources` 验证服务可访问。
+容器或负载均衡探活请使用无需密钥、只返回最小信息的 `/api/healthz`。完整诊断使用 `/api/health`。
 
 ### 3) systemd 相关功能不可用
 这是 Linux 专用功能，Windows 环境下会自动失败但不会影响面板启动。
@@ -120,9 +126,18 @@ docker compose up -d --build
 - **不要把 `.env` 提交到仓库**（已在 `.gitignore` 中忽略）
 - 管理密钥、模型密钥等敏感字段请只放在 `.env`
 - 面板当前默认监听 `0.0.0.0`，方便局域网访问；如果只用于本机，建议把 `CLIPROXY_PANEL_BIND_HOST` 改成 `127.0.0.1`
-- 如需对面板加一道访问门槛，可设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`（启用后 `/api/*` 需要 `X-Panel-Key` 或 URL 参数 `panel_key`）
+- 如需对面板加一道访问门槛，可设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`（`/api/*` 只接受 `X-Panel-Key`；浏览器 URL 参数仅用于首次写入本地存储并会立即移除，仍应避免在共享日志中使用）
+- 跨域访问默认关闭；只有明确需要时才设置逗号分隔的 `CLIPROXY_PANEL_CORS_ORIGINS`
 - 前端已移除所有导出入口，避免把敏感内容通过浏览器下载链接暴露出去
 - 主配置写回默认关闭；如你非常确定要恢复，才在 `.env` 中显式设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`
+
+## 开发验证
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+ruff check app.py scripts tests
+```
 
 ## 许可协议
 MIT License（见 `LICENSE`）

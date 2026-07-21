@@ -1,4 +1,4 @@
-# CPA-X Admin Panel (v2.1.2)
+# CPA-X Admin Panel (v2.2.0)
 
 English | [中文](README_CN.md)
 
@@ -6,9 +6,11 @@ English | [中文](README_CN.md)
 
 - AI deployment guide: `AI_DEPLOY_CN.md`
 - Agent instructions: `AGENTS.md`
-- Release notes: `RELEASE_NOTES_v2.1.2.md`
+- Release notes: `RELEASE_NOTES_v2.2.0.md`
 
 A monitoring and management panel for **CLIProxyAPI**, featuring health checks, resource monitoring, logs, update management, request statistics, and pricing display.
+
+v2.2.0 focuses on cross-region deployment and long-running stability. Offset-less CLIProxy log timestamps are normalized to UTC API timestamps; `auto` mode infers the log offset even when the panel container and host use different time zones. Updates are downloaded/verified or built in isolation before a short atomic stop/replace/start window, with count, age, and total-size backup limits.
 
 > Current security posture: **all frontend export entries are removed, and main-config writeback is disabled by default**. The config area is read-only / validate-only unless you explicitly set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` in `.env`.
 
@@ -77,10 +79,12 @@ Key configurations:
 - `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `CLIPROXY_PANEL_CLIPROXY_API_PORT`
 - `CLIPROXY_PANEL_MANAGEMENT_KEY` / `CLIPROXY_PANEL_MODELS_API_KEY` (if upstream keys are enabled)
 - `CLIPROXY_PANEL_CLIPROXY_SERVICE` / `CLIPROXY_PANEL_CLIPROXY_BINARY` (required for auto-update)
+- `CLIPROXY_PANEL_LOG_TIMEZONE` (defaults to `auto`; also accepts `UTC`, `+08:00`, or IANA zones such as `Asia/Shanghai`)
+- `CLIPROXY_PANEL_BACKUP_*` / `CLIPROXY_PANEL_UPDATE_REQUIRE_CHECKSUM` (backup caps and update verification)
 - `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED` (defaults to `false`; only enable main-config writeback if you explicitly accept that risk)
 - `CLIPROXY_PANEL_GITHUB_TOKEN` (optional: higher GitHub rate limit, fewer `latest=unknown`)
 - `CLIPROXY_PANEL_PRICING_*` (optional: cost estimation; defaults can be auto-synced from OpenRouter, disable via `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false`)
-- `CLIPROXY_PANEL_QUOTES_PATH` (optional: quote library; defaults to repository-root `X.txt`, included in this repo)
+- `CLIPROXY_PANEL_QUOTES_PATH` (optional supplemental library; repository-root `X.txt` is always loaded and currently contains 181 entries)
 
 #### 4) Start the panel
 ```bash
@@ -114,8 +118,10 @@ If you need logs/config/auth file features, follow the comments in `docker-compo
 ### 1) Page loads but data is empty
 Check if CLIProxy is running and verify that `CLIPROXY_PANEL_CLIPROXY_API_BASE/PORT` in `.env` points to the correct address.
 
+CLIProxyAPI v7 uses the short-lived `/v0/management/usage-queue`. CPA-X detects it automatically, consumes it every 15 seconds, and persists the deltas. Set `usage-statistics-enabled: true` in CLIProxyAPI's `config.yaml`, or no token records will be emitted. The cumulative v6 endpoint remains supported.
+
 ### 2) Health check timeout
-`/api/status` triggers additional checks and may be slow on first load. Try `/api/resources` first to verify service accessibility.
+Use the unauthenticated minimal `/api/healthz` endpoint for container/load-balancer liveness checks. Use `/api/health` for full diagnostics.
 
 ### 3) systemd features not working
 This is a Linux-only feature. On Windows, it will fail gracefully without affecting panel startup.
@@ -124,9 +130,18 @@ This is a Linux-only feature. On Windows, it will fail gracefully without affect
 - **Do not commit `.env` to the repository** (already in `.gitignore`)
 - Keep management keys and model keys only in `.env`
 - Default bind host is `0.0.0.0` for LAN-friendly deployment. If you only use the panel locally, set `CLIPROXY_PANEL_BIND_HOST=127.0.0.1`
-- For an extra protection layer, set `CLIPROXY_PANEL_PANEL_ACCESS_KEY` (then `/api/*` requires `X-Panel-Key` or URL query `panel_key`)
+- For an extra protection layer, set `CLIPROXY_PANEL_PANEL_ACCESS_KEY` (`/api/*` accepts only the `X-Panel-Key` header; the browser URL parameter is consumed only for one-time local setup and immediately removed)
+- Cross-origin API access is disabled by default; only set the comma-separated `CLIPROXY_PANEL_CORS_ORIGINS` when needed
 - All frontend export entries are removed to avoid exposing sensitive data through browser download links
 - Main-config writeback is disabled by default; only set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` if you explicitly accept that risk
+
+## Development checks
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+ruff check app.py scripts tests
+```
 
 ## License
 MIT License (see `LICENSE`)

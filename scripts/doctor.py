@@ -25,6 +25,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -56,10 +57,7 @@ def is_linux() -> bool:
 
 
 def has_systemd() -> bool:
-    if not is_linux():
-        return False
-    code, out, _ = run_capture(["bash", "-lc", "command -v systemctl >/dev/null 2>&1; echo $?"])
-    return code == 0 and out.endswith("0")
+    return is_linux() and which("systemctl")
 
 
 def systemctl_value(unit: str, prop: str) -> str:
@@ -95,19 +93,21 @@ def extract_config_from_cmdline(cmdline: str) -> Tuple[Optional[str], Optional[s
     binary = parts[0]
     config_path = None
     for i, token in enumerate(parts):
-        if token in {"-config", "--config"} and i + 1 < len(parts):
+        if token in {"-config", "--config", "-c"} and i + 1 < len(parts):
             config_path = parts[i + 1]
             break
-        if token.startswith("-config="):
+        if token.startswith(("-config=", "--config=", "-c=")):
             config_path = token.split("=", 1)[1]
             break
     return binary, config_path
 
 
-def list_running_services() -> list[str]:
+def list_services() -> list[str]:
     if not has_systemd():
         return []
-    code, out, _ = run_capture(["systemctl", "list-units", "--type=service", "--state=running", "--no-legend"])
+    code, out, _ = run_capture([
+        "systemctl", "list-units", "--all", "--type=service", "--no-legend", "--no-pager"
+    ])
     if code != 0 or not out:
         return []
     units = []
@@ -167,12 +167,15 @@ def detect_from_config(config_path: Optional[str]) -> Dict[str, str]:
     ret: Dict[str, str] = {}
     # port / host
     port = config.get("port")
-    if isinstance(port, int) and port > 0:
+    if isinstance(port, int) and not isinstance(port, bool) and 0 < port <= 65535:
         ret["cliproxy_api_port"] = str(port)
 
     auth_dir = config.get("auth-dir") or config.get("auth_dir")
     if isinstance(auth_dir, str) and auth_dir.strip():
-        ret["auth_dir"] = auth_dir.strip()
+        expanded = Path(os.path.expandvars(os.path.expanduser(auth_dir.strip())))
+        if not expanded.is_absolute():
+            expanded = p.parent / expanded
+        ret["auth_dir"] = str(expanded.resolve(strict=False))
 
     return ret
 
@@ -216,7 +219,14 @@ def upsert_env_file(path: Path, updates: Dict[str, str], overwrite_existing: boo
     if path.exists():
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
 
-    wanted = {env_key(k): v for k, v in updates.items() if v is not None}
+    wanted = {}
+    for key, value in updates.items():
+        if value is None:
+            continue
+        value_text = str(value)
+        if any(char in value_text for char in ("\r", "\n", "\x00")):
+            continue
+        wanted[env_key(key)] = value_text
     if not wanted:
         return
 
@@ -242,7 +252,26 @@ def upsert_env_file(path: Path, updates: Dict[str, str], overwrite_existing: boo
         if k not in seen:
             new_lines.append(f"{k}={v}")
 
-    path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing_mode = None
+    try:
+        existing_mode = path.stat().st_mode & 0o777
+    except OSError:
+        pass
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write("\n".join(new_lines) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, existing_mode if existing_mode is not None else 0o600)
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.remove(temp_name)
+        except OSError:
+            pass
+        raise
 
 
 def main() -> int:
@@ -256,7 +285,7 @@ def main() -> int:
     result: Dict[str, str] = {}
 
     # Panel defaults (AI safe)
-    result["bind_host"] = "127.0.0.1"
+    result["bind_host"] = "0.0.0.0"
     result["panel_port"] = "8080"
     result["cliproxy_api_base"] = "http://127.0.0.1"
 
@@ -266,13 +295,34 @@ def main() -> int:
     working_dir = None
 
     if has_systemd():
-        units = list_running_services()
+        units = list_services()
         unit = pick_cliproxy_unit(units)
         if unit:
             execstart = systemctl_value(unit, "ExecStart")
             cmdline = parse_execstart(execstart) or ""
             binary, config_path = extract_config_from_cmdline(cmdline)
             working_dir = systemctl_value(unit, "WorkingDirectory") or None
+
+            if working_dir:
+                working_dir = str(Path(working_dir).expanduser().resolve(strict=False))
+            if config_path and not os.path.isabs(config_path):
+                config_path = str(
+                    ((Path(working_dir) if working_dir else Path.cwd()) / config_path).resolve(strict=False)
+                )
+            if binary and not os.path.isabs(binary):
+                binary = str(
+                    ((Path(working_dir) if working_dir else Path.cwd()) / binary).resolve(strict=False)
+                )
+
+            # CLIProxyAPI can start without an explicit --config flag. Prefer a
+            # config beside its declared working directory before leaving the
+            # example placeholder in place.
+            if not config_path and working_dir:
+                for name in ("config.yaml", "config.yml"):
+                    candidate = Path(working_dir) / name
+                    if candidate.is_file():
+                        config_path = str(candidate.resolve())
+                        break
 
             # systemctl 命令接受带/不带 .service；面板里推荐不带
             if unit.endswith(".service"):
@@ -282,6 +332,13 @@ def main() -> int:
 
     if binary:
         result["cliproxy_binary"] = binary
+    else:
+        detected_binary = next(
+            (shutil.which(name) for name in ("cli-proxy-api", "cliproxyapi", "cliproxy") if shutil.which(name)),
+            None,
+        )
+        if detected_binary:
+            result["cliproxy_binary"] = detected_binary
     if config_path:
         result["cliproxy_config"] = config_path
         config_detect = detect_from_config(config_path)

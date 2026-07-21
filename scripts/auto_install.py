@@ -3,14 +3,15 @@ import os
 import shutil
 import subprocess
 import sys
+import re
+import tempfile
 from pathlib import Path
 
 
 def run(cmd, cwd=None):
-    if isinstance(cmd, str):
-        result = subprocess.run(cmd, cwd=cwd, shell=True)
-    else:
-        result = subprocess.run(cmd, cwd=cwd)
+    if isinstance(cmd, (str, bytes)):
+        raise TypeError("run() requires an argument sequence")
+    result = subprocess.run([str(part) for part in cmd], cwd=cwd, shell=False, check=False)
     if result.returncode != 0:
         raise SystemExit(result.returncode)
 
@@ -35,29 +36,46 @@ def install_requirements(project_root: Path, venv_py: str):
 def ensure_env(project_root: Path, venv_py: str):
     env_file = project_root / ".env"
     example = project_root / ".env.example"
-    if not env_file.exists() and example.exists():
+    created_from_example = not env_file.exists() and example.exists()
+    if created_from_example:
         env_file.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+        try:
+            env_file.chmod(0o600)
+        except OSError:
+            pass
 
     # AI-friendly: try auto-detect to fill paths/service name (keys still need manual input)
     doctor = project_root / "scripts" / "doctor.py"
     if doctor.exists():
         try:
             python_bin = venv_py if venv_py and Path(venv_py).exists() else sys.executable
+            doctor_args = [python_bin, str(doctor), "--write-env", f"--env-path={env_file}"]
+            if created_from_example:
+                # The example contains realistic-looking placeholder paths; on
+                # first install they must be replaced by detected values.
+                doctor_args.append("--overwrite-existing")
             subprocess.run(
-                [python_bin, str(doctor), "--write-env", f"--env-path={env_file}"],
+                doctor_args,
                 cwd=str(project_root),
                 check=False,
+                shell=False,
             )
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"[installer] doctor failed: {exc}", file=sys.stderr)
 
 
 def systemd_quote(value: Path | str) -> str:
-    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    raw = str(value)
+    if any(char in raw for char in ("\r", "\n", "\x00")):
+        raise ValueError("systemd value contains an invalid control character")
+    escaped = raw.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 
 
 def install_systemd(project_root: Path, venv_py: str, service_name: str, start_service: bool):
+    service_name = service_name.removesuffix(".service")
+    if not re.fullmatch(r"(?:[A-Za-z0-9_.@:-]|\\x[0-9A-Fa-f]{2})+", service_name) or service_name.startswith("-"):
+        raise SystemExit("无效的 systemd 服务名。")
     service_path = Path("/etc/systemd/system") / f"{service_name}.service"
     content = "\n".join([
         "[Unit]",
@@ -71,12 +89,29 @@ def install_systemd(project_root: Path, venv_py: str, service_name: str, start_s
         "Restart=always",
         "RestartSec=5",
         "Environment=PYTHONUNBUFFERED=1",
+        "Environment=PYTHONDONTWRITEBYTECODE=1",
+        "UMask=0077",
+        "PrivateTmp=true",
+        "TimeoutStopSec=20",
         "",
         "[Install]",
         "WantedBy=multi-user.target",
         "",
     ])
-    service_path.write_text(content, encoding="utf-8")
+    fd, temp_name = tempfile.mkstemp(prefix=f".{service_name}.", suffix=".tmp", dir=service_path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, 0o644)
+        os.replace(temp_name, service_path)
+    except Exception:
+        try:
+            os.remove(temp_name)
+        except OSError:
+            pass
+        raise
     run(["systemctl", "daemon-reload"])
     run(["systemctl", "enable", service_name])
     if start_service:
@@ -85,8 +120,20 @@ def install_systemd(project_root: Path, venv_py: str, service_name: str, start_s
 
 def start_windows(project_root: Path, venv_py: str):
     app_path = project_root / "app.py"
-    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    subprocess.Popen([venv_py, str(app_path)], cwd=str(project_root), creationflags=creationflags)
+    creationflags = (
+        subprocess.CREATE_NEW_PROCESS_GROUP
+        | subprocess.DETACHED_PROCESS
+        | subprocess.CREATE_NO_WINDOW
+    )
+    subprocess.Popen(
+        [venv_py, str(app_path)],
+        cwd=str(project_root),
+        creationflags=creationflags,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
 
 
 def main():
@@ -100,6 +147,8 @@ def main():
     project_root = Path(__file__).resolve().parent.parent
     is_windows = os.name == "nt"
     python_bin = sys.executable
+    if sys.version_info < (3, 11):
+        raise SystemExit("CPA-X 需要 Python 3.11 或更高版本。")
 
     venv_dir = ensure_venv(project_root, python_bin)
     venv_py = venv_python(venv_dir, is_windows)

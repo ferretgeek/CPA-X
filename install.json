@@ -1,6 +1,6 @@
 {
   "name": "CPA-X",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "description": "CLIProxyAPI 管理面板",
   "language": "python",
   "entrypoint": "app.py",
@@ -8,7 +8,7 @@
   "env_examples": [".env.example", ".env.docker.example"],
   "ports": [8080],
   "healthcheck": {
-    "path": "/api/resources",
+    "path": "/api/healthz",
     "method": "GET",
     "timeout_seconds": 5
   },
@@ -53,5 +53,10 @@
     "auto_install": "scripts/auto_install.py",
     "install_sh": "scripts/install.sh",
     "install_ps1": "scripts/install.ps1"
-  }
+  },
+  "checks": [
+    "python -m pytest",
+    "ruff check app.py scripts tests",
+    "python -m py_compile app.py scripts/auto_install.py scripts/doctor.py"
+  ]
 }

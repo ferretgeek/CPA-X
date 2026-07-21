@@ -3,12 +3,15 @@ services:
     build: .
     container_name: cpax-panel
     restart: unless-stopped
+    init: true
     ports:
       - "8080:8080"
     environment:
       # 容器内必须监听 0.0.0.0 才能让端口映射生效
       CLIPROXY_PANEL_BIND_HOST: "0.0.0.0"
       CLIPROXY_PANEL_PANEL_PORT: "8080"
+      CLIPROXY_PANEL_AUTO_UPDATE_ENABLED: "false"
+      CLIPROXY_PANEL_LOG_TIMEZONE: "auto"
 
       # 让面板访问宿主机上的 CLIProxyAPI（默认端口 8317）
       # Windows/Mac Docker Desktop 通常可直接用 host.docker.internal
@@ -41,3 +44,8 @@ services:
       # - /path/on/host/config.yaml:/mnt/cliproxy/config.yaml:ro
       # - /path/on/host/main.log:/mnt/cliproxy/main.log:ro
       # - /path/on/host/auths:/mnt/cliproxy/auths:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
