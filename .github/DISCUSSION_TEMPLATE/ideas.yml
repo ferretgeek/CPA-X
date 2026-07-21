@@ -1,0 +1,38 @@
+title: "[Idea] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景
+      description: 这个想法要解决什么实际问题？
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 想法说明
+      description: 描述理想行为、界面或工作流。
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 相关范围
+      options:
+        - 后端 / API
+        - 前端 / UI
+        - 时区与日志
+        - 用量与费用
+        - 更新与备份
+        - 安装与部署
+        - 文档与社区
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: 兼容性与替代方案
+      description: 是否影响现有配置、旧版本或特定部署方式？还有哪些替代方案？

@@ -1,0 +1,28 @@
+title: "[Showcase] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        分享你的 CPA-X 部署、界面调整、运维经验或与 CLIProxyAPI 的组合方式。请勿公开服务器地址、密钥或完整配置。
+  - type: textarea
+    id: showcase
+    attributes:
+      label: 项目展示
+      description: 你搭建了什么，它解决了什么问题？
+    validations:
+      required: true
+  - type: textarea
+    id: stack
+    attributes:
+      label: 技术与部署方式
+      description: 可说明操作系统、容器/systemd、反向代理等非敏感信息。
+  - type: textarea
+    id: lessons
+    attributes:
+      label: 经验与建议
+      description: 哪些设置或做法值得其他用户参考？
+  - type: textarea
+    id: media
+    attributes:
+      label: 截图或链接
+      description: 上传前请检查图片和链接不包含敏感信息。

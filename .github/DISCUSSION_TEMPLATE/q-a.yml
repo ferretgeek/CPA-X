@@ -1,0 +1,45 @@
+title: "[Q&A] "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提问。请先阅读 README 和现有讨论，并删除密钥、Token、密码、私有地址及 `.env` 内容。
+  - type: input
+    id: versions
+    attributes:
+      label: 版本信息
+      description: CPA-X、CLIProxyAPI、Python 与操作系统版本
+      placeholder: CPA-X v2.2.0; CLIProxyAPI v7.x; Python 3.12; Ubuntu 24.04
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: 部署方式
+      options:
+        - Linux + systemd
+        - Docker / Compose
+        - Windows
+        - macOS
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: 你的问题
+      description: 说明目标、当前行为和卡住的位置。
+    validations:
+      required: true
+  - type: textarea
+    id: attempts
+    attributes:
+      label: 已尝试的方法
+      description: 列出查看过的文档、命令和排查结果。
+  - type: textarea
+    id: context
+    attributes:
+      label: 已脱敏的补充信息
+      description: 可粘贴短日志或截图，但必须彻底脱敏。
