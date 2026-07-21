@@ -12,6 +12,7 @@ v2.2.0 重点解决跨地区部署与长期运行问题：CLIProxy 无偏移日�
 > - AI 部署手册：`AI_DEPLOY_CN.md`
 > - Agent 指引：`AGENTS.md`
 > - 更新说明：`RELEASE_NOTES_v2.2.0.md`
+> - 开箱即用发行包：[下载最新版](https://github.com/ferretgeek/CPA-X/releases/latest)
 
 ## 预览图
 
@@ -20,6 +21,9 @@ v2.2.0 重点解决跨地区部署与长期运行问题：CLIProxy 无偏移日�
 
 ### 浅色主题
 ![CPA-X 浅色预览](docs/images/preview-light.png)
+
+### 移动端布局
+![CPA-X 移动端预览](docs/images/preview-mobile.png)
 
 ## 适用环境
 - **推荐：Linux**（面板含 `systemctl` 相关功能）

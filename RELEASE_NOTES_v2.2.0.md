@@ -1,6 +1,13 @@
 # CPA-X v2.2.0 Release Notes / 更新说明
 
-发布日期 / Release date: 2026-07-21
+发布日期 / Release date: 2026-07-22
+
+## 下载 / Downloads
+
+- `CPA-X-v2.2.0.zip`：Windows、Linux 与 macOS 通用部署包。
+- `CPA-X-v2.2.0.tar.gz`：适合 Linux/macOS 服务器的通用部署包。
+- `SHA256SUMS.txt`：发行包与三张预览图的 SHA-256 校验值。
+- `preview-dark.png`、`preview-light.png`、`preview-mobile.png`：v2.2.0 最新界面截图。
 
 ## 中文
 

@@ -7,6 +7,7 @@ English | [中文](README_CN.md)
 - AI deployment guide: `AI_DEPLOY_CN.md`
 - Agent instructions: `AGENTS.md`
 - Release notes: `RELEASE_NOTES_v2.2.0.md`
+- Ready-to-download packages: [Latest GitHub Release](https://github.com/ferretgeek/CPA-X/releases/latest)
 
 A monitoring and management panel for **CLIProxyAPI**, featuring health checks, resource monitoring, logs, update management, request statistics, and pricing display.
 
@@ -21,6 +22,9 @@ v2.2.0 focuses on cross-region deployment and long-running stability. Offset-les
 
 ### Light Theme
 ![CPA-X Light Preview](docs/images/preview-light.png)
+
+### Mobile Layout
+![CPA-X Mobile Preview](docs/images/preview-mobile.png)
 
 ## Requirements
 - **Recommended: Linux** (panel includes `systemctl` functionality)
