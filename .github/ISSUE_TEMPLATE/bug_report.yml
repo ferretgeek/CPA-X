@@ -1,0 +1,88 @@
+name: 缺陷报告 / Bug report
+description: 报告可以稳定复现的 CPA-X 问题
+title: "[Bug] "
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请先使用最新版本复现，并删除日志中的密钥、Token、密码、私有地址和 `.env` 内容。
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前检查
+      options:
+        - label: 我已搜索现有 Issue，未发现相同问题。
+          required: true
+        - label: 我已在最新版本上复现。
+          required: true
+        - label: 我确认内容中不包含密钥、Token 或其他敏感信息。
+          required: true
+  - type: input
+    id: cpa_version
+    attributes:
+      label: CPA-X 版本
+      placeholder: v2.2.0
+    validations:
+      required: true
+  - type: input
+    id: cli_version
+    attributes:
+      label: CLIProxyAPI 版本
+      placeholder: v7.x.x
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: 部署方式
+      options:
+        - Linux + systemd
+        - Docker / Compose
+        - Windows
+        - macOS
+        - 其他
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 系统与 Python 版本
+      placeholder: Ubuntu 24.04, Python 3.12
+    validations:
+      required: true
+  - type: input
+    id: timezone
+    attributes:
+      label: 时区相关配置
+      description: 包括服务器/容器时区和 CLIPROXY_PANEL_LOG_TIMEZONE
+      placeholder: Host Asia/Shanghai, container UTC, log timezone auto
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述
+      description: 实际发生了什么？预期应该是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 最小复现步骤
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 已脱敏日志或截图
+      description: 可粘贴短日志或拖入截图；请先彻底脱敏。
+      render: shell
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其他信息

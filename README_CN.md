@@ -14,6 +14,17 @@ v2.2.0 重点解决跨地区部署与长期运行问题：CLIProxy 无偏移日�
 > - 更新说明：`RELEASE_NOTES_v2.2.0.md`
 > - 开箱即用发行包：[下载最新版](https://github.com/ferretgeek/CPA-X/releases/latest)
 
+## 核心能力
+
+| 能力 | 说明 |
+| --- | --- |
+| 跨时区可靠性 | 自动推断无偏移日志时间，API 统一输出 UTC/RFC 3339，适配国内外服务器与容器。 |
+| 安全自动更新 | 在线准备、SHA-256 校验、原子替换、连续健康确认与失败回滚。 |
+| 用量与费用 | 兼容 CLIProxyAPI v6 累计接口与 v7 用量队列，持久化 Token、缓存、推理与费用。 |
+| 长期运行 | 增量日志解析、原子持久化、后台退避与备份数量/天数/容量三重限制。 |
+| 可读界面 | 无外部字体依赖的深浅色响应式 UI，支持桌面、平板、手机与键盘操作。 |
+| 多种部署 | 支持 Linux/systemd、Windows 与 Docker 监控模式，并提供自动探测安装脚本。 |
+
 ## 预览图
 
 ### 深色主题
@@ -142,6 +153,14 @@ pip install -r requirements-dev.txt
 python -m pytest
 ruff check app.py scripts tests
 ```
+
+## 社区与贡献
+
+- [参与贡献](CONTRIBUTING.md)
+- [获取帮助](SUPPORT.md)
+- [社区行为准则](CODE_OF_CONDUCT.md)
+- [问题反馈](https://github.com/ferretgeek/CPA-X/issues/new/choose)
+- [讨论区](https://github.com/ferretgeek/CPA-X/discussions)
 
 ## 许可协议
 MIT License（见 `LICENSE`）

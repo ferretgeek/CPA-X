@@ -15,6 +15,17 @@ v2.2.0 focuses on cross-region deployment and long-running stability. Offset-les
 
 > Current security posture: **all frontend export entries are removed, and main-config writeback is disabled by default**. The config area is read-only / validate-only unless you explicitly set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` in `.env`.
 
+## Highlights
+
+| Capability | What it provides |
+| --- | --- |
+| Cross-time-zone reliability | Infers offset-less log time, emits UTC/RFC 3339 APIs, and supports split host/container zones. |
+| Safe auto-update | Online preparation, SHA-256 verification, atomic replacement, consecutive health checks, and rollback. |
+| Usage and cost insights | Supports CLIProxyAPI v6 cumulative usage and the v7 queue with durable token, cache, reasoning, and cost totals. |
+| Long-running stability | Incremental log parsing, atomic persistence, outage backoff, and count/age/size backup caps. |
+| Readable interface | Self-contained responsive dark/light UI for desktop, tablet, mobile, and keyboard users. |
+| Flexible deployment | Linux/systemd, Windows, and Docker monitoring modes with auto-detection installers. |
+
 ## Preview
 
 ### Dark Theme
@@ -146,6 +157,14 @@ pip install -r requirements-dev.txt
 python -m pytest
 ruff check app.py scripts tests
 ```
+
+## Community
+
+- [Contributing guide](CONTRIBUTING.md)
+- [Support](SUPPORT.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Report an issue](https://github.com/ferretgeek/CPA-X/issues/new/choose)
+- [Discussions](https://github.com/ferretgeek/CPA-X/discussions)
 
 ## License
 MIT License (see `LICENSE`)
