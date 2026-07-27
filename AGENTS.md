@@ -72,13 +72,15 @@
   - `CLIPROXY_PANEL_AUTH_DIR`：auth 目录（凭证文件列表/健康检查依赖它）
   - `CLIPROXY_PANEL_CLIPROXY_LOG`：日志文件（请求统计/日志面板依赖它）
   - `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `CLIPROXY_PANEL_CLIPROXY_API_PORT`：管理接口地址
+  - `CLIPROXY_PANEL_AUTO_UPDATE_FAILURE_BACKOFF_SECONDS` / `CLIPROXY_PANEL_AUTO_UPDATE_FAILURE_BACKOFF_MAX_SECONDS`：失败版本退避，默认 6 小时起、24 小时封顶
+  - `CLIPROXY_PANEL_SERVICE_HEALTH_TIMEOUT_SECONDS`：更新后等待 systemd 与真实管理接口同时健康的最长时间，默认 45 秒
 
 ## 4) 自检（你应该在部署后立即跑）
 
 用 curl 验证（示例 key 请替换）：
 
 - 管理接口：
-  - `curl -sS -o /dev/null -w '%{http_code}\n' -H 'X-Management-Key: <KEY>' http://127.0.0.1:8317/v0/management/usage`
+  - `curl -sS -o /dev/null -w '%{http_code}\n' -H 'X-Management-Key: <KEY>' http://127.0.0.1:8317/v0/management/config`
 - 模型列表：
   - `curl -sS -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer <KEY>' http://127.0.0.1:8317/v1/models`
 - 面板状态：
@@ -86,9 +88,12 @@
 
 ## 5) 自动更新为什么会失败（常见原因）
 
-- GitHub API 限流（未认证只有 60 次/小时）：建议配置 `CLIPROXY_PANEL_GITHUB_TOKEN`（可选）
+- GitHub API 限流：未配置 Token 时会优先通过官方 `releases/latest` 跳转与稳定资产地址检查更新；配置 `CLIPROXY_PANEL_GITHUB_TOKEN` 后使用认证 API
 - 面板无 root 权限：无法 `systemctl stop/start`、无法写入二进制路径
 - 服务名不对：`CLIPROXY_PANEL_CLIPROXY_SERVICE` 需要与真实 unit 一致
+- 管理接口未返回 `200`：即使 systemd 显示 active，更新也会判为失败并自动回滚
+
+新版 CLIProxyAPI 不再提供旧 usage 管理接口；不得恢复后台 usage 轮询。历史 Token/费用数据仅从本地兼容快照读取，实时请求数由日志增量统计。
 
 ## 6) 面板面向 AI 的设计约束
 

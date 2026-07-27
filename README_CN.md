@@ -1,17 +1,17 @@
-# CPA-X 管理面板（v2.2.0）
+# CPA-X 管理面板（v2.2.1）
 
 [English](README.md) | 中文
 
 一个用于 **CLIProxyAPI** 的监控与管理面板，支持健康检查、资源监控、日志查看、更新管理、请求统计与定价显示等功能。
 
-v2.2.0 重点解决跨地区部署与长期运行问题：CLIProxy 无偏移日志会统一转换为 UTC API 时间，`auto` 模式可在面板容器与宿主机时区不同的情况下推断日志偏移；自动更新会先在线下载/校验或隔离构建，再用最短停机窗口原子替换，并受数量、天数、总大小三重备份上限保护。
+v2.2.1 针对一次间歇 `502` 生产故障强化更新流程：部署成功必须由带认证的真实管理接口返回 HTTP `200`，失败版本会持久指数退避，匿名 GitHub 检查优先使用稳定 Release 跳转，并彻底停止废弃 usage 后台轮询。
 
 > 当前安全策略：**前端已移除所有导出入口，主配置写回默认关闭**；配置区仅保留查看/校验能力，如确需恢复写回，必须在 `.env` 中显式设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`。
 
 > **AI 优先**：本仓库主要面向 AI Agent 部署/运维（而不是人类手动部署）。
 > - AI 部署手册：`AI_DEPLOY_CN.md`
 > - Agent 指引：`AGENTS.md`
-> - 更新说明：`RELEASE_NOTES_v2.2.0.md`
+> - 更新说明：`RELEASE_NOTES_v2.2.1.md`
 > - 版本历史：`CHANGELOG.md`
 > - 开箱即用发行包：[下载最新版](https://github.com/ferretgeek/CPA-X/releases/latest)
 
@@ -20,8 +20,8 @@ v2.2.0 重点解决跨地区部署与长期运行问题：CLIProxy 无偏移日�
 | 能力 | 说明 |
 | --- | --- |
 | 跨时区可靠性 | 自动推断无偏移日志时间，API 统一输出 UTC/RFC 3339，适配国内外服务器与容器。 |
-| 安全自动更新 | 在线准备、SHA-256 校验、原子替换、连续健康确认与失败回滚。 |
-| 用量与费用 | 兼容 CLIProxyAPI v6 累计接口与 v7 用量队列，持久化 Token、缓存、推理与费用。 |
+| 安全自动更新 | 在线准备、SHA-256 校验、原子替换、真实管理接口健康确认、失败回滚与版本退避。 |
+| 用量与费用 | 以请求日志提供实时请求统计，并保留已有本地兼容快照中的历史 Token 与费用数据。 |
 | 长期运行 | 增量日志解析、原子持久化、后台退避与备份数量/天数/容量三重限制。 |
 | 可读界面 | 无外部字体依赖的深浅色响应式 UI，支持桌面、平板、手机与键盘操作。 |
 | 多种部署 | 支持 Linux/systemd、Windows 与 Docker 监控模式，并提供自动探测安装脚本。 |
@@ -94,6 +94,7 @@ cp .env.example .env
 - `CLIPROXY_PANEL_CLIPROXY_SERVICE` / `CLIPROXY_PANEL_CLIPROXY_BINARY`（自动更新需要）
 - `CLIPROXY_PANEL_LOG_TIMEZONE`（默认 `auto`；也支持 `UTC`、`+08:00`、`Asia/Shanghai` 等）
 - `CLIPROXY_PANEL_BACKUP_*` / `CLIPROXY_PANEL_UPDATE_REQUIRE_CHECKSUM`（备份上限与更新校验策略）
+- `CLIPROXY_PANEL_AUTO_UPDATE_FAILURE_BACKOFF_*` / `CLIPROXY_PANEL_SERVICE_HEALTH_TIMEOUT_SECONDS`（失败版本退避与真实管理接口健康检查）
 - `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED`（默认 `false`；只在你明确接受风险时才开启主配置写回）
 - `CLIPROXY_PANEL_GITHUB_TOKEN`（可选：提高 GitHub 限流额度，减少 `latest=unknown`）
 - `CLIPROXY_PANEL_PRICING_*`（可选：费用估算；默认支持自动同步 OpenRouter 定价，可用 `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false` 关闭）
@@ -130,7 +131,7 @@ docker compose up -d --build
 ### 1) 页面能打开但数据为空
 检查 CLIProxy 是否在运行，并确认 `.env` 中的 `CLIPROXY_PANEL_CLIPROXY_API_BASE/PORT` 指向正确。
 
-CLIProxyAPI v7 使用短期保留的 `/v0/management/usage-queue`，CPA-X 会自动识别并每 15 秒消费、持久化；请在 CLIProxyAPI 的 `config.yaml` 中设置 `usage-statistics-enabled: true`，否则不会产生 Token 用量记录。v6 的累计用量接口仍兼容。
+新版 CLIProxyAPI 已移除旧 usage 管理接口。CPA-X 不再后台轮询这些接口，实时请求数量改由日志增量统计；升级前已经落盘的 Token 与费用历史仍从本地兼容快照读取，不会因为上游接口 `404` 反复重试。
 
 ### 2) 健康检查超时
 容器或负载均衡探活请使用无需密钥、只返回最小信息的 `/api/healthz`。完整诊断使用 `/api/health`。

@@ -1,4 +1,4 @@
-# CPA-X Admin Panel (v2.2.0)
+# CPA-X Admin Panel (v2.2.1)
 
 English | [中文](README_CN.md)
 
@@ -6,13 +6,13 @@ English | [中文](README_CN.md)
 
 - AI deployment guide: `AI_DEPLOY_CN.md`
 - Agent instructions: `AGENTS.md`
-- Release notes: `RELEASE_NOTES_v2.2.0.md`
+- Release notes: `RELEASE_NOTES_v2.2.1.md`
 - Version history: `CHANGELOG.md`
 - Ready-to-download packages: [Latest GitHub Release](https://github.com/ferretgeek/CPA-X/releases/latest)
 
 A monitoring and management panel for **CLIProxyAPI**, featuring health checks, resource monitoring, logs, update management, request statistics, and pricing display.
 
-v2.2.0 focuses on cross-region deployment and long-running stability. Offset-less CLIProxy log timestamps are normalized to UTC API timestamps; `auto` mode infers the log offset even when the panel container and host use different time zones. Updates are downloaded/verified or built in isolation before a short atomic stop/replace/start window, with count, age, and total-size backup limits.
+v2.2.1 hardens production updates after an intermittent `502` incident: deployment success now requires the authenticated management endpoint to return HTTP `200`, failed releases use durable exponential backoff, anonymous GitHub checks prefer stable release redirects, and deprecated usage polling is no longer started.
 
 > Current security posture: **all frontend export entries are removed, and main-config writeback is disabled by default**. The config area is read-only / validate-only unless you explicitly set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` in `.env`.
 
@@ -21,8 +21,8 @@ v2.2.0 focuses on cross-region deployment and long-running stability. Offset-les
 | Capability | What it provides |
 | --- | --- |
 | Cross-time-zone reliability | Infers offset-less log time, emits UTC/RFC 3339 APIs, and supports split host/container zones. |
-| Safe auto-update | Online preparation, SHA-256 verification, atomic replacement, consecutive health checks, and rollback. |
-| Usage and cost insights | Supports CLIProxyAPI v6 cumulative usage and the v7 queue with durable token, cache, reasoning, and cost totals. |
+| Safe auto-update | Online preparation, SHA-256 verification, atomic replacement, real management-endpoint health checks, rollback, and failed-version backoff. |
+| Usage and cost insights | Uses incremental logs for live request totals and preserves historical token/cost data from existing local compatibility snapshots. |
 | Long-running stability | Incremental log parsing, atomic persistence, outage backoff, and count/age/size backup caps. |
 | Readable interface | Self-contained responsive dark/light UI for desktop, tablet, mobile, and keyboard users. |
 | Flexible deployment | Linux/systemd, Windows, and Docker monitoring modes with auto-detection installers. |
@@ -97,6 +97,7 @@ Key configurations:
 - `CLIPROXY_PANEL_CLIPROXY_SERVICE` / `CLIPROXY_PANEL_CLIPROXY_BINARY` (required for auto-update)
 - `CLIPROXY_PANEL_LOG_TIMEZONE` (defaults to `auto`; also accepts `UTC`, `+08:00`, or IANA zones such as `Asia/Shanghai`)
 - `CLIPROXY_PANEL_BACKUP_*` / `CLIPROXY_PANEL_UPDATE_REQUIRE_CHECKSUM` (backup caps and update verification)
+- `CLIPROXY_PANEL_AUTO_UPDATE_FAILURE_BACKOFF_*` / `CLIPROXY_PANEL_SERVICE_HEALTH_TIMEOUT_SECONDS` (failed-version backoff and real management-endpoint health checks)
 - `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED` (defaults to `false`; only enable main-config writeback if you explicitly accept that risk)
 - `CLIPROXY_PANEL_GITHUB_TOKEN` (optional: higher GitHub rate limit, fewer `latest=unknown`)
 - `CLIPROXY_PANEL_PRICING_*` (optional: cost estimation; defaults can be auto-synced from OpenRouter, disable via `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false`)
@@ -134,7 +135,7 @@ If you need logs/config/auth file features, follow the comments in `docker-compo
 ### 1) Page loads but data is empty
 Check if CLIProxy is running and verify that `CLIPROXY_PANEL_CLIPROXY_API_BASE/PORT` in `.env` points to the correct address.
 
-CLIProxyAPI v7 uses the short-lived `/v0/management/usage-queue`. CPA-X detects it automatically, consumes it every 15 seconds, and persists the deltas. Set `usage-statistics-enabled: true` in CLIProxyAPI's `config.yaml`, or no token records will be emitted. The cumulative v6 endpoint remains supported.
+Current CLIProxyAPI releases no longer expose the legacy usage management endpoints. CPA-X no longer polls them in the background: live request totals come from incremental log parsing, while token/cost history already stored before the upgrade remains available from local compatibility snapshots without repeated upstream `404` requests.
 
 ### 2) Health check timeout
 Use the unauthenticated minimal `/api/healthz` endpoint for container/load-balancer liveness checks. Use `/api/health` for full diagnostics.

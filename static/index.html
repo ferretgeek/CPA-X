@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CPA-X 管理面板 v2.2.0</title>
+    <title>CPA-X 管理面板 v2.2.1</title>
     <meta name="theme-color" content="#0c1222">
     <link rel="icon" href="/favicon.ico" sizes="any">
     <link rel="shortcut icon" href="/favicon.ico">
@@ -1404,7 +1404,7 @@
                 <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
             </div>
             <span class="logo-text">CPA-X</span>
-            <span class="badge info" id="panel-version-badge" style="margin-left:6px;">v2.2.0</span>
+            <span class="badge info" id="panel-version-badge" style="margin-left:6px;">v2.2.1</span>
         </div>
         <div class="header-center">
             <div class="header-stat">
@@ -2435,7 +2435,7 @@
                     statusClass = 'warning';
                 } else if (phase === 'no_update') {
                     statusClass = 'success';
-                } else if (phase === 'wait_idle') {
+                } else if (phase === 'wait_idle' || phase === 'backoff') {
                     statusClass = 'warning';
                 } else if (phase === 'ready') {
                     statusClass = 'success';
@@ -2449,6 +2449,12 @@
                     detailParts.push(`发现新版本：${escapeHtml(d.version.current)} → ${escapeHtml(d.version.latest)}`);
                 } else {
                     detailParts.push('当前没有可安装的新版本');
+                }
+                if (autoStatus.phase === 'backoff' && autoStatus.failure_count > 0) {
+                    detailParts.push(
+                        `版本 ${escapeHtml(autoStatus.failed_version || d.version.latest)} 已失败 `
+                        + `${escapeHtml(autoStatus.failure_count)} 次，自动更新将在退避结束后重试；手动强制更新仍可立即执行`
+                    );
                 }
                 if (autoIdle.reason === 'log_unavailable') {
                     detailParts.push('请求日志路径不可用；为避免中断流量，自动更新已保持等待');

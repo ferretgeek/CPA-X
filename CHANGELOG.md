@@ -4,6 +4,16 @@ CPA-X follows semantic versioning. Detailed notes and downloadable packages are 
 
 CPA-X 遵循语义化版本。详细说明和可下载发行包统一发布在 GitHub Releases 页面。
 
+## [2.2.1] - 2026-07-27
+
+Production repair release for intermittent `502` amplification: real management-endpoint update health checks, durable failed-version backoff, anonymous GitHub release fallback, and removal of deprecated background usage polling.
+
+修复间歇 `502` 被更新流程放大的长期运行问题：更新后验证真实管理接口、失败版本持久退避、匿名 GitHub Release 稳定回退，并停止废弃 usage 后台轮询。
+
+- [Release](https://github.com/ferretgeek/CPA-X/releases/tag/v2.2.1)
+- [Full notes](RELEASE_NOTES_v2.2.1.md)
+- [Compare v2.2.0...v2.2.1](https://github.com/ferretgeek/CPA-X/compare/v2.2.0...v2.2.1)
+
 ## [2.2.0] - 2026-07-22
 
 Comprehensive repair release covering cross-time-zone log handling, transactional auto-update, bounded backups, v6/v7 usage accounting, atomic persistence, performance, security hardening, and a complete responsive UI redesign.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CPA-X 管理面板后端 v2.2.0
+CPA-X 管理面板后端 v2.2.1
 功能: 为 CLIProxyAPI 提供监控统计、健康检查、资源监控、配置管理、API测试、模型管理
 优化: 缓存机制、预编译正则、非阻塞监控、减少shell调用
 """
@@ -35,7 +35,7 @@ from requests.adapters import HTTPAdapter
 
 # 面板自身版本（与 GitHub Release/README 同步）
 PANEL_NAME = "CPA-X"
-PANEL_VERSION = "2.2.0"
+PANEL_VERSION = "2.2.1"
 PRICING_BASIS_TOKENS = 1_000_000
 PRICING_BASIS_LABEL = '百万Tokens'
 PRICING_BASIS_TEXT = f'美元/{PRICING_BASIS_LABEL}'
@@ -107,6 +107,9 @@ CONFIG = {
     'idle_threshold_seconds': 1800,  # 30分钟
     'auto_update_check_interval': 300,
     'auto_update_enabled': True,
+    'auto_update_failure_backoff_seconds': 21600,
+    'auto_update_failure_backoff_max_seconds': 86400,
+    'service_health_timeout_seconds': 45,
     # CLIProxyAPI 使用进程本地时区写入无偏移日志。auto 会从日志时间与文件 mtime 推断，
     # 也可显式填写 local、UTC、+08:00 或 IANA 时区（如 Asia/Shanghai）。
     'log_timezone': 'auto',
@@ -149,6 +152,9 @@ CONFIG_TYPES = {
     'idle_threshold_seconds': int,
     'auto_update_check_interval': int,
     'auto_update_enabled': bool,
+    'auto_update_failure_backoff_seconds': int,
+    'auto_update_failure_backoff_max_seconds': int,
+    'service_health_timeout_seconds': int,
     'backup_retention_count': int,
     'backup_max_age_days': int,
     'backup_max_total_mb': int,
@@ -587,6 +593,9 @@ def _normalize_runtime_config():
         'cliproxy_api_port': (1, 65535, 8317),
         'idle_threshold_seconds': (10, 7 * 86400, 1800),
         'auto_update_check_interval': (60, 86400, 300),
+        'auto_update_failure_backoff_seconds': (60, 7 * 86400, 21600),
+        'auto_update_failure_backoff_max_seconds': (60, 30 * 86400, 86400),
+        'service_health_timeout_seconds': (5, 300, 45),
         'backup_retention_count': (1, 20, BACKUP_RETENTION_COUNT),
         'backup_max_age_days': (1, 3650, 14),
         'backup_max_total_mb': (16, 10240, 512),
@@ -598,6 +607,11 @@ def _normalize_runtime_config():
             print(f'Warning: invalid {key}={CONFIG.get(key)!r}; using {fallback}')
             value = fallback
         CONFIG[key] = value
+
+    CONFIG['auto_update_failure_backoff_max_seconds'] = max(
+        CONFIG['auto_update_failure_backoff_seconds'],
+        CONFIG['auto_update_failure_backoff_max_seconds'],
+    )
 
     for key in ('pricing_input', 'pricing_output', 'pricing_cache'):
         value = as_float(CONFIG.get(key), 0.0)
@@ -629,6 +643,7 @@ def config_write_blocked_response():
     return jsonify({'success': False, 'error': message, 'message': message}), 403
 
 UPDATE_HISTORY_PATH = os.path.join(DATA_DIR, 'update_history.json')
+AUTO_UPDATE_STATE_PATH = os.path.join(DATA_DIR, 'auto_update_state.json')
 
 # 全局状态
 state = {
@@ -640,6 +655,9 @@ state = {
     'last_auto_update_check_time': None,
     'next_auto_update_check_time': None,
     'next_auto_update_check_monotonic': None,
+    'auto_update_failure_count': 0,
+    'auto_update_retry_not_before': None,
+    'auto_update_failed_version': None,
     'current_version': 'unknown',
     'latest_version': 'unknown',
     'has_update': False,
@@ -741,6 +759,7 @@ usage_fetch_lock = threading.Lock()
 update_history_lock = threading.Lock()
 update_lock = threading.Lock()
 auto_update_wakeup = threading.Event()
+auto_update_failure_lock = threading.Lock()
 
 http_session = requests.Session()
 http_session.headers.update({'User-Agent': f'{PANEL_NAME}/{PANEL_VERSION}'})
@@ -1625,45 +1644,6 @@ def get_effective_pricing(*, allow_remote=True):
     return eff, meta
 
 
-def import_usage_snapshot(snapshot):
-    if not snapshot:
-        return False
-    if _management_auth_locked():
-        return False
-    try:
-        base_url = _build_management_base_url()
-        url = f'{base_url}/v0/management/usage/import'
-        headers = _management_headers()
-        with http_session.post(url, headers=headers, json=snapshot, timeout=8) as resp:
-            _observe_management_response(resp)
-            resp.raise_for_status()
-        return True
-    except Exception as e:
-        print(f"Warning: usage import failed: {e}")
-        return False
-
-
-def _usage_snapshot_worker():
-    # Disk snapshots are display fallbacks only. Re-importing them on every panel
-    # restart can duplicate upstream counters depending on CLIProxyAPI version.
-    while True:
-        delay = 60
-        try:
-            _, meta = fetch_usage_snapshot(use_cache=False, with_meta=True)
-            # v7 queue items expire after 60 seconds by default, so poll well
-            # inside that window. Cumulative v6 snapshots remain low-frequency.
-            if meta.get('source') == 'queue':
-                delay = 15
-        except Exception:
-            pass
-        time.sleep(delay)
-
-
-def start_usage_snapshot_worker():
-    thread = threading.Thread(target=_usage_snapshot_worker, daemon=True)
-    thread.start()
-
-
 def _read_file_first_line(path):
     try:
         if os.path.exists(path):
@@ -2118,73 +2098,87 @@ def format_uptime(seconds):
         return f'{days}天{hours}小时'
 
 
+def _configured_github_token():
+    return (os.environ.get('CLIPROXY_PANEL_GITHUB_TOKEN') or os.environ.get('GITHUB_TOKEN') or '').strip()
+
+
+def _latest_release_redirect_version(repo):
+    """Resolve releases/latest without consuming the anonymous API quota."""
+    html_latest_url = f'https://github.com/{repo}/releases/latest'
+    resp = http_session.get(
+        html_latest_url,
+        headers={'User-Agent': 'CLIProxyPanel'},
+        timeout=10,
+        allow_redirects=False,
+        stream=True,
+    )
+    try:
+        location = resp.headers.get('Location', '')
+        match = re.search(r'/tag/(v[^/?#]+)', location)
+    finally:
+        resp.close()
+    if match:
+        return match.group(1)
+
+    resp = http_session.get(
+        html_latest_url,
+        headers={'User-Agent': 'CLIProxyPanel'},
+        timeout=10,
+        allow_redirects=True,
+        stream=True,
+    )
+    try:
+        match = re.search(r'/tag/(v[^/?#]+)', str(getattr(resp, 'url', '') or ''))
+    finally:
+        resp.close()
+    return match.group(1) if match else 'unknown'
+
+
+def _latest_release_api_version(repo, token=''):
+    headers = {
+        'User-Agent': 'CLIProxyPanel',
+        'Accept': 'application/vnd.github+json',
+    }
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    with http_session.get(
+        f'https://api.github.com/repos/{repo}/releases/latest',
+        headers=headers,
+        timeout=8,
+        stream=True,
+    ) as resp:
+        if resp.status_code != 200:
+            return 'unknown'
+        data = _response_json_limited(resp, 2 * 1024 * 1024)
+        return (data.get('tag_name') if isinstance(data, dict) else None) or 'unknown'
+
+
 def get_github_release_version(use_cache=True):
-    """从GitHub releases获取最新版本号（带缓存）"""
+    """从 GitHub releases 获取最新版本；匿名场景优先使用稳定跳转地址。"""
     cache_key = 'github_release'
     if use_cache:
         cached = cache.get(cache_key, max_age=300)
         if cached is not None:
             return cached
 
-    try:
-        repo = 'router-for-me/CLIProxyAPI'
-        api_url = f'https://api.github.com/repos/{repo}/releases/latest'
-        html_latest_url = f'https://github.com/{repo}/releases/latest'
+    repo = 'router-for-me/CLIProxyAPI'
+    token = _configured_github_token()
+    attempts = (
+        (lambda: _latest_release_api_version(repo, token), 'api'),
+        (lambda: _latest_release_redirect_version(repo), 'redirect'),
+    ) if token else (
+        (lambda: _latest_release_redirect_version(repo), 'redirect'),
+        (lambda: _latest_release_api_version(repo), 'api fallback'),
+    )
 
-        def api_headers():
-            headers = {
-                'User-Agent': 'CLIProxyPanel',
-                'Accept': 'application/vnd.github+json',
-            }
-            token = (os.environ.get('CLIPROXY_PANEL_GITHUB_TOKEN') or os.environ.get('GITHUB_TOKEN') or '').strip()
-            if token:
-                headers['Authorization'] = 'Bearer ' + token
-            return headers
-
-        # 1) 优先用 GitHub API（有 token 时限额更高）
+    for resolver, label in attempts:
         try:
-            with http_session.get(api_url, headers=api_headers(), timeout=8, stream=True) as resp:
-                if resp.status_code == 200:
-                    data = _response_json_limited(resp, 2 * 1024 * 1024)
-                    version = (data.get('tag_name') if isinstance(data, dict) else None) or 'unknown'
-                    cache.set(cache_key, version)
-                    return version
-        except Exception as e:
-            print(f'get_github_release_version api error: {e}')
-
-        # 2) 回退：解析 /releases/latest 的 302 跳转（不依赖 GitHub API，避免 rate limit）
-        try:
-            resp = http_session.get(
-                html_latest_url,
-                headers={'User-Agent': 'CLIProxyPanel'},
-                timeout=10,
-                allow_redirects=False,
-                stream=True,
-            )
-            location = resp.headers.get('Location', '')
-            resp.close()
-            m = re.search(r'/tag/(v[^/?#]+)', location)
-            if not m:
-                # 极端情况下不返回 302，则跟随跳转后从最终 URL 解析
-                resp2 = http_session.get(
-                    html_latest_url,
-                    headers={'User-Agent': 'CLIProxyPanel'},
-                    timeout=10,
-                    allow_redirects=True,
-                    stream=True,
-                )
-                m = re.search(r'/tag/(v[^/?#]+)', str(getattr(resp2, 'url', '') or ''))
-                resp2.close()
-            if m:
-                version = m.group(1)
+            version = resolver()
+            if _release_version_key(version) is not None:
                 cache.set(cache_key, version)
                 return version
-        except Exception as e:
-            print(f'get_github_release_version fallback error: {e}')
-    except Exception as e:
-        print(f'get_github_release_version error: {e}')
-        cache.set(cache_key, 'unknown')
-        return 'unknown'
+        except Exception as exc:
+            print(f'get_github_release_version {label} error: {exc}')
 
     cache.set(cache_key, 'unknown')
     return 'unknown'
@@ -2708,6 +2702,117 @@ def get_latest_commit():
     cache.set(cache_key, result)
     return result
 
+
+def _auto_update_failure_payload():
+    return {
+        'failure_count': max(0, _safe_int(state.get('auto_update_failure_count'), 0)),
+        'retry_not_before': state.get('auto_update_retry_not_before'),
+        'failed_version': state.get('auto_update_failed_version'),
+        'saved_at': _utc_iso(),
+    }
+
+
+def _save_auto_update_failure_state_locked():
+    try:
+        _atomic_write_json(AUTO_UPDATE_STATE_PATH, _auto_update_failure_payload(), mode=0o600)
+        return True
+    except Exception as exc:
+        print(f'Warning: failed to save auto-update retry state: {exc}')
+        return False
+
+
+def load_auto_update_failure_state():
+    if not os.path.exists(AUTO_UPDATE_STATE_PATH):
+        return False
+    try:
+        data = _load_json_file_limited(AUTO_UPDATE_STATE_PATH, 64 * 1024)
+        if not isinstance(data, dict):
+            return False
+        failed_version = _decorate_version_tag(data.get('failed_version'))
+        if _release_version_key(failed_version) is None:
+            failed_version = None
+        retry_not_before = data.get('retry_not_before')
+        if retry_not_before and _parse_iso_datetime(retry_not_before) is None:
+            retry_not_before = None
+        with auto_update_failure_lock:
+            state['auto_update_failure_count'] = max(0, _safe_int(data.get('failure_count'), 0))
+            state['auto_update_retry_not_before'] = retry_not_before
+            state['auto_update_failed_version'] = failed_version
+        return True
+    except Exception as exc:
+        print(f'Warning: failed to load auto-update retry state: {exc}')
+        return False
+
+
+def _clear_auto_update_failure_state():
+    with auto_update_failure_lock:
+        changed = bool(
+            state.get('auto_update_failure_count')
+            or state.get('auto_update_retry_not_before')
+            or state.get('auto_update_failed_version')
+        )
+        state['auto_update_failure_count'] = 0
+        state['auto_update_retry_not_before'] = None
+        state['auto_update_failed_version'] = None
+        if changed:
+            _save_auto_update_failure_state_locked()
+    return changed
+
+
+def _record_auto_update_failure(version):
+    failed_version = _decorate_version_tag(version)
+    if _release_version_key(failed_version) is None:
+        return None
+    with auto_update_failure_lock:
+        previous_version = _decorate_version_tag(state.get('auto_update_failed_version'))
+        if previous_version.lower() == failed_version.lower():
+            failure_count = max(0, _safe_int(state.get('auto_update_failure_count'), 0)) + 1
+        else:
+            failure_count = 1
+        base_delay = max(60, _safe_int(CONFIG.get('auto_update_failure_backoff_seconds'), 21600))
+        max_delay = max(base_delay, _safe_int(CONFIG.get('auto_update_failure_backoff_max_seconds'), 86400))
+        delay = min(max_delay, base_delay * (2 ** min(failure_count - 1, 20)))
+        retry_not_before = _utc_iso(_utc_now() + timedelta(seconds=delay))
+        state['auto_update_failure_count'] = failure_count
+        state['auto_update_retry_not_before'] = retry_not_before
+        state['auto_update_failed_version'] = failed_version
+        _save_auto_update_failure_state_locked()
+        return {
+            'failure_count': failure_count,
+            'retry_not_before': retry_not_before,
+            'failed_version': failed_version,
+            'retry_in_seconds': delay,
+        }
+
+
+def _auto_update_failure_snapshot():
+    with auto_update_failure_lock:
+        failure_count = max(0, _safe_int(state.get('auto_update_failure_count'), 0))
+        retry_not_before = state.get('auto_update_retry_not_before')
+        failed_version = state.get('auto_update_failed_version')
+    retry_in_seconds = 0
+    retry_at = _parse_iso_datetime(retry_not_before)
+    if retry_at is not None:
+        retry_in_seconds = max(0, int((retry_at - _utc_now()).total_seconds()))
+    return {
+        'failure_count': failure_count,
+        'retry_not_before': retry_not_before,
+        'failed_version': failed_version,
+        'retry_in_seconds': retry_in_seconds,
+    }
+
+
+def _clear_failure_for_new_release(latest_version):
+    latest = _decorate_version_tag(latest_version)
+    if _release_version_key(latest) is None:
+        return False
+    with auto_update_failure_lock:
+        failed = _decorate_version_tag(state.get('auto_update_failed_version'))
+    if failed and failed.lower() != latest.lower():
+        return _clear_auto_update_failure_state()
+    return False
+
+
 def check_for_updates(use_cache=True, *, allow_network=True):
     """检查更新（使用GitHub releases）"""
     cache_key = 'update_check_details'
@@ -2729,6 +2834,7 @@ def check_for_updates(use_cache=True, *, allow_network=True):
     latest_display = _decorate_version_tag(latest)
     state['current_version'] = current_display
     state['latest_version'] = latest_display
+    _clear_failure_for_new_release(latest_display)
 
     # 语义比较避免把“本地版本更高”或前缀差异误判为可更新。
     current_key = _release_version_key(current_display)
@@ -2825,6 +2931,7 @@ def get_auto_update_state(has_update=None, stats=None):
         has_update = check_for_updates()
 
     idle_state = get_idle_state(stats)
+    failure_state = _auto_update_failure_snapshot()
     next_check_time = state.get('next_auto_update_check_time')
     next_check_in_seconds = None
     next_check_monotonic = state.get('next_auto_update_check_monotonic')
@@ -2851,6 +2958,9 @@ def get_auto_update_state(has_update=None, stats=None):
     elif not has_update:
         phase = 'no_update'
         summary = '已是最新版本'
+    elif failure_state['retry_in_seconds'] > 0:
+        phase = 'backoff'
+        summary = f'上次更新失败，{format_uptime(failure_state["retry_in_seconds"])}后自动重试'
     elif not idle_state.get('is_idle'):
         phase = 'wait_idle'
         if idle_state.get('reason') == 'log_unavailable':
@@ -2877,17 +2987,42 @@ def get_auto_update_state(has_update=None, stats=None):
         'next_check_time': next_check_time,
         'next_check_in_seconds': next_check_in_seconds,
         'idle': idle_state,
+        'failure_count': failure_state['failure_count'],
+        'retry_not_before': failure_state['retry_not_before'],
+        'retry_in_seconds': failure_state['retry_in_seconds'],
+        'failed_version': failure_state['failed_version'],
     }
 
-def _wait_for_service_running(service_name, timeout=15):
-    """Wait for two consecutive active samples so crash loops do not look healthy."""
+def _management_config_status():
+    """Return the real management API status used to validate an updated service."""
+    if not _management_key_configured():
+        return None
+    try:
+        with http_session.get(
+            f'{_build_management_base_url()}/v0/management/config',
+            headers=_management_headers(),
+            timeout=(2, 4),
+            stream=True,
+        ) as resp:
+            _observe_management_response(resp)
+            return int(resp.status_code)
+    except Exception:
+        return None
+
+
+def _wait_for_service_healthy(service_name, timeout=None):
+    """Require both systemd active and two consecutive management API 200s."""
+    timeout = timeout or CONFIG.get('service_health_timeout_seconds', 45)
     deadline = time.monotonic() + max(1, timeout)
     consecutive = 0
     last_status = None
     while time.monotonic() < deadline:
         cache.invalidate('service_status')
         last_status = get_service_status(use_cache=False)
-        if last_status.get('running'):
+        management_status = _management_config_status() if last_status.get('running') else None
+        last_status = dict(last_status)
+        last_status['management_config_status'] = management_status
+        if last_status.get('running') and management_status == 200:
             consecutive += 1
             if consecutive >= 2:
                 return True, last_status
@@ -3048,12 +3183,14 @@ def perform_update(*, lock_acquired=False):
                     os.remove(cliproxy_bin)
                 restarted, _, restart_error = run_cmd(['systemctl', 'start', service_name])
                 cache.invalidate('service_status')
-                running, _ = _wait_for_service_running(service_name, timeout=10) if restarted else (False, None)
-                service_stopped = not running
-                if running:
+                healthy, _ = _wait_for_service_healthy(service_name) if restarted else (False, None)
+                service_stopped = not healthy
+                if healthy:
                     result['details'].append('Rollback successful')
                     return True
-                result['details'].append(f'Rollback restart failed: {restart_error or "service inactive"}')
+                result['details'].append(
+                    f'Rollback health check failed: {restart_error or "management endpoint unavailable"}'
+                )
             except Exception as exc:
                 result['details'].append(f'Rollback failed: {exc}')
             return False
@@ -3066,10 +3203,10 @@ def perform_update(*, lock_acquired=False):
             result['message'] = f'Start failed: {stderr}' + (' (rolled back)' if rolled_back else '')
             return False, result
 
-        running, _ = _wait_for_service_running(service_name, timeout=15)
-        if not running:
-            rolled_back = rollback_binary('service did not remain active after update')
-            result['message'] = 'Service failed its post-update startup check' + (' (rolled back)' if rolled_back else '')
+        healthy, _ = _wait_for_service_healthy(service_name)
+        if not healthy:
+            rolled_back = rollback_binary('service or management endpoint did not become healthy after update')
+            result['message'] = 'Service failed its post-update health check' + (' (rolled back)' if rolled_back else '')
             return False, result
         service_stopped = False
 
@@ -3093,8 +3230,9 @@ def perform_update(*, lock_acquired=False):
 
         result['success'] = True
         result['message'] = 'Update successful'
-        result['details'].append('Service is running and stable')
+        result['details'].append('Service is active and management endpoint returned HTTP 200')
         state['last_update_time'] = _utc_iso()
+        _clear_auto_update_failure_state()
 
         for cache_key in ('local_version', 'local_version_mgmt', 'current_commit', 'github_release', 'update_check_details'):
             cache.invalidate(cache_key)
@@ -3122,6 +3260,8 @@ def perform_update(*, lock_acquired=False):
         if service_stopped and service_name and is_linux() and command_available('systemctl'):
             run_cmd(['systemctl', 'start', service_name])
             cache.invalidate('service_status')
+        if not result.get('success'):
+            _record_auto_update_failure(updated_release_version or state.get('latest_version'))
         state['last_update_result'] = result
         state['update_in_progress'] = False
         update_lock.release()
@@ -3158,26 +3298,29 @@ def update_from_github_release(binary_path=''):
         repo = 'router-for-me/CLIProxyAPI'
         api_error = None
         data = {}
+        token = _configured_github_token()
 
-        # 1) 优先：GitHub API（可能遇到未认证限流）
-        try:
-            headers = {'User-Agent': 'CLIProxyPanel', 'Accept': 'application/vnd.github+json'}
-            token = (os.environ.get('CLIPROXY_PANEL_GITHUB_TOKEN') or os.environ.get('GITHUB_TOKEN') or '').strip()
-            if token:
-                headers['Authorization'] = 'Bearer ' + token
-
-            with http_session.get(
-                f'https://api.github.com/repos/{repo}/releases/latest',
-                headers=headers,
-                timeout=10,
-                stream=True,
-            ) as resp:
-                resp.raise_for_status()
-                data = _response_json_limited(resp, 4 * 1024 * 1024)
-        except Exception as e:
-            api_error = e
-            data = {}
-            print(f'Warning: failed to fetch release info via GitHub API: {e}')
+        # 有认证时使用 assets 元数据；匿名场景直接走 releases/latest
+        # 跳转和稳定资产命名，避免消耗容易见底的 GitHub API 限额。
+        if token:
+            try:
+                headers = {
+                    'User-Agent': 'CLIProxyPanel',
+                    'Accept': 'application/vnd.github+json',
+                    'Authorization': 'Bearer ' + token,
+                }
+                with http_session.get(
+                    f'https://api.github.com/repos/{repo}/releases/latest',
+                    headers=headers,
+                    timeout=10,
+                    stream=True,
+                ) as resp:
+                    resp.raise_for_status()
+                    data = _response_json_limited(resp, 4 * 1024 * 1024)
+            except Exception as e:
+                api_error = e
+                data = {}
+                print(f'Warning: failed to fetch authenticated release info via GitHub API: {e}')
 
         resolved_tag = _decorate_version_tag((data.get('tag_name') or '') if isinstance(data, dict) else '')
         if _release_version_key(resolved_tag) is None:
@@ -3414,6 +3557,15 @@ def auto_update_worker():
             has_update = check_for_updates(use_cache=False)
             if not has_update:
                 print(f'[{_utc_iso()}] Auto-update check: no new release')
+                continue
+
+            failure_state = _auto_update_failure_snapshot()
+            if failure_state['retry_in_seconds'] > 0:
+                print(
+                    f'[{_utc_iso()}] Auto-update skipped: retry backoff for '
+                    f'{failure_state.get("failed_version") or "current release"}, '
+                    f'{failure_state["retry_in_seconds"]}s remaining'
+                )
                 continue
 
             idle_state = get_idle_state()
@@ -5098,8 +5250,13 @@ def api_stats():
 @app.route('/api/stats/clear', methods=['POST'])
 def api_clear_stats():
     """清空请求统计（清空累计值，更新快照为当前值）"""
-    # 先获取当前 CLIProxyAPI 的值，作为新的快照起点
-    snapshot, snapshot_meta = fetch_usage_snapshot(use_cache=False, with_meta=True)
+    # 新版上游不再提供旧 usage 接口。这里只读取本地兼容快照，
+    # 清空统计绝不能为了建立基线再次请求已废弃的管理端点。
+    snapshot, snapshot_meta = fetch_usage_snapshot(
+        use_cache=False,
+        with_meta=True,
+        allow_network=False,
+    )
     token_totals, usage_reqs = aggregate_usage_snapshot(snapshot)
 
     with log_lock:
@@ -5392,6 +5549,7 @@ def initialize_runtime():
 
     os.makedirs(DATA_DIR, exist_ok=True)
     load_persistent_stats()
+    load_auto_update_failure_state()
     save_persistent_stats(force=True)
     load_log_stats_state()
     resource_monitor.start()
@@ -5407,7 +5565,6 @@ def initialize_runtime():
     threads = [
         threading.Thread(target=auto_update_worker, daemon=True, name='cpa-auto-update'),
         threading.Thread(target=background_tasks, daemon=True, name='cpa-background'),
-        threading.Thread(target=_usage_snapshot_worker, daemon=True, name='cpa-usage-snapshot'),
         threading.Thread(target=_persistent_stats_worker, daemon=True, name='cpa-stats-persist'),
     ]
     for thread in threads:

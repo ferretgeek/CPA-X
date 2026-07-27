@@ -24,7 +24,7 @@ body:
     id: cpa_version
     attributes:
       label: CPA-X 版本
-      placeholder: v2.2.0
+      placeholder: v2.2.1
     validations:
       required: true
   - type: input

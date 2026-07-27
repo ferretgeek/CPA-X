@@ -11,7 +11,7 @@ body:
     attributes:
       label: 版本信息
       description: CPA-X、CLIProxyAPI、Python 与操作系统版本
-      placeholder: CPA-X v2.2.0; CLIProxyAPI v7.x; Python 3.12; Ubuntu 24.04
+      placeholder: CPA-X v2.2.1; CLIProxyAPI v7.x; Python 3.12; Ubuntu 24.04
     validations:
       required: true
   - type: dropdown

@@ -1,4 +1,5 @@
 import copy
+import inspect
 import io
 import json
 import os
@@ -88,6 +89,57 @@ def test_semantic_version_ordering():
     assert app._release_version_key('v1.2.3') > app._release_version_key('v1.2.3-rc.10')
     assert app._release_version_key('v1.2.3+build.5') == app._release_version_key('v1.2.3+build.9')
     assert app._release_version_key('v1.2.3-rc.1+build.5') is not None
+
+
+def test_anonymous_release_check_prefers_latest_redirect(monkeypatch):
+    monkeypatch.delenv('CLIPROXY_PANEL_GITHUB_TOKEN', raising=False)
+    monkeypatch.delenv('GITHUB_TOKEN', raising=False)
+    urls = []
+
+    class RedirectResponse:
+        def __init__(self):
+            self.headers = {'Location': '/router-for-me/CLIProxyAPI/releases/tag/v7.2.102'}
+            self.url = 'https://github.com/router-for-me/CLIProxyAPI/releases/latest'
+
+        def close(self):
+            pass
+
+    def fake_get(url, **_kwargs):
+        urls.append(url)
+        if 'api.github.com' in url:
+            raise AssertionError('anonymous release check consumed the GitHub API')
+        return RedirectResponse()
+
+    monkeypatch.setattr(app.http_session, 'get', fake_get)
+    assert app.get_github_release_version(use_cache=False) == 'v7.2.102'
+    assert urls == ['https://github.com/router-for-me/CLIProxyAPI/releases/latest']
+
+
+def test_auto_update_failure_backoff_persists_and_resets_for_new_release(tmp_path, monkeypatch):
+    retry_path = tmp_path / 'auto_update_state.json'
+    monkeypatch.setattr(app, 'AUTO_UPDATE_STATE_PATH', str(retry_path))
+    monkeypatch.setitem(app.CONFIG, 'auto_update_failure_backoff_seconds', 6 * 3600)
+    monkeypatch.setitem(app.CONFIG, 'auto_update_failure_backoff_max_seconds', 24 * 3600)
+    now = datetime(2026, 7, 27, 12, 0, tzinfo=app.UTC)
+    monkeypatch.setattr(app, '_utc_now', lambda: now)
+
+    first = app._record_auto_update_failure('v7.2.102')
+    second = app._record_auto_update_failure('v7.2.102')
+    third = app._record_auto_update_failure('v7.2.102')
+    assert first['retry_in_seconds'] == 6 * 3600
+    assert second['retry_in_seconds'] == 12 * 3600
+    assert third['retry_in_seconds'] == 24 * 3600
+    assert retry_path.exists()
+
+    app.state['auto_update_failure_count'] = 0
+    app.state['auto_update_retry_not_before'] = None
+    app.state['auto_update_failed_version'] = None
+    assert app.load_auto_update_failure_state() is True
+    assert app.state['auto_update_failure_count'] == 3
+    assert app.state['auto_update_failed_version'] == 'v7.2.102'
+
+    assert app._clear_failure_for_new_release('v7.2.103') is True
+    assert app._auto_update_failure_snapshot()['failure_count'] == 0
 
 
 def test_incremental_log_parser_handles_methods_exclusions_partial_lines_and_rotation(tmp_path, monkeypatch):
@@ -342,7 +394,7 @@ def test_update_prepares_before_stopping_and_rolls_binary_back(tmp_path, monkeyp
 
     monkeypatch.setattr(app, 'run_cmd', fake_run)
     monkeypatch.setattr(app, 'update_from_github_release', fake_release)
-    monkeypatch.setattr(app, '_wait_for_service_running', lambda *_args, **_kwargs: (True, {'running': True}))
+    monkeypatch.setattr(app, '_wait_for_service_healthy', lambda *_args, **_kwargs: (True, {'running': True}))
 
     success, result = app.perform_update()
     assert success is False
@@ -356,6 +408,84 @@ def test_update_prepares_before_stopping_and_rolls_binary_back(tmp_path, monkeyp
     success, _ = app.perform_update()
     assert success is False
     assert not any(call[:2] == ('systemctl', 'stop') for call in calls)
+
+
+def test_update_health_requires_management_config_http_200(monkeypatch):
+    monkeypatch.setitem(app.CONFIG, 'management_key', 'management-key')
+    monkeypatch.setattr(app, 'get_service_status', lambda **_kwargs: {'running': True})
+    monkeypatch.setattr(app.time, 'sleep', lambda _seconds: None)
+    statuses = iter([503, 200, 200])
+    requests_seen = []
+
+    class FakeResponse:
+        def __init__(self, status):
+            self.status_code = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_get(url, **kwargs):
+        requests_seen.append((url, kwargs.get('headers', {})))
+        return FakeResponse(next(statuses))
+
+    monkeypatch.setattr(app.http_session, 'get', fake_get)
+    healthy, details = app._wait_for_service_healthy('cliproxy', timeout=5)
+    assert healthy is True
+    assert details['management_config_status'] == 200
+    assert len(requests_seen) == 3
+    assert all(url.endswith('/v0/management/config') for url, _headers in requests_seen)
+    assert all(headers['X-Management-Key'] == 'management-key' for _url, headers in requests_seen)
+
+
+def test_update_rolls_back_when_management_endpoint_never_becomes_healthy(tmp_path, monkeypatch):
+    binary = tmp_path / 'cliproxyapi'
+    old_bytes = b'old-binary'
+    binary.write_bytes(old_bytes)
+    monkeypatch.setitem(app.CONFIG, 'cliproxy_binary', str(binary))
+    monkeypatch.setitem(app.CONFIG, 'cliproxy_dir', str(tmp_path / 'not-a-repo'))
+    monkeypatch.setitem(app.CONFIG, 'cliproxy_service', 'cliproxy')
+    monkeypatch.setattr(app, 'is_linux', lambda: True)
+    monkeypatch.setattr(app, 'command_available', lambda _name: True)
+    monkeypatch.setattr(app, 'run_cmd', lambda *_args, **_kwargs: (True, '', ''))
+
+    def fake_release(binary_path=''):
+        Path(binary_path).write_bytes(b'n' * (128 * 1024))
+        return True, 'verified', 'v9.9.9'
+
+    health_results = iter([
+        (False, {'running': True, 'management_config_status': 503}),
+        (True, {'running': True, 'management_config_status': 200}),
+    ])
+    monkeypatch.setattr(app, 'update_from_github_release', fake_release)
+    monkeypatch.setattr(app, '_wait_for_service_healthy', lambda *_args, **_kwargs: next(health_results))
+
+    success, result = app.perform_update()
+    assert success is False
+    assert 'rolled back' in result['message']
+    assert binary.read_bytes() == old_bytes
+
+
+def test_runtime_does_not_start_deprecated_usage_polling():
+    source = inspect.getsource(app.initialize_runtime)
+    assert 'usage_snapshot_worker' not in source
+
+
+def test_clear_stats_never_requests_deprecated_usage_endpoint(tmp_path, monkeypatch):
+    snapshot_path = tmp_path / 'usage.json'
+    snapshot_path.write_text('{"usage": {"total_requests": 7}}', encoding='utf-8')
+    monkeypatch.setitem(app.CONFIG, 'usage_snapshot_path', str(snapshot_path))
+    monkeypatch.setitem(app.CONFIG, 'persistent_stats_path', str(tmp_path / 'stats.json'))
+    _configure_log(tmp_path, monkeypatch, _log_line('2026-07-21 15:00:00', 200))
+
+    def unexpected_network(*_args, **_kwargs):
+        raise AssertionError('stats clear requested a deprecated usage endpoint')
+
+    monkeypatch.setattr(app.http_session, 'get', unexpected_network)
+    response = app.app.test_client().post('/api/stats/clear', json={})
+    assert response.status_code == 200
 
 
 def test_stats_clear_never_copies_or_truncates_service_log(tmp_path, monkeypatch):
