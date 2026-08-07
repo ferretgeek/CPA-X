@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Verify and publish
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Verify tag and application versions
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          expected = tag.removeprefix("v")
+          app_text = Path("app.py").read_text(encoding="utf-8")
+          match = re.search(r'^PANEL_VERSION = "([^"]+)"$', app_text, re.MULTILINE)
+          install_version = json.loads(Path("install.json").read_text(encoding="utf-8"))["version"]
+          if not match or match.group(1) != expected or install_version != expected:
+              raise SystemExit(
+                  f"Version mismatch: tag={tag}, app={match.group(1) if match else 'missing'}, "
+                  f"install.json={install_version}"
+              )
+          PY
+
+      - name: Run release checks
+        run: |
+          python -m pytest
+          python -m ruff check --select E9,F63,F7,F82 app.py scripts tests
+          python -m bandit -q -r app.py scripts -lll
+
+      - name: Build source archives
+        run: |
+          mkdir -p dist
+          prefix="CPA-X-${RELEASE_TAG#v}/"
+          git archive --format=zip --prefix="$prefix" --output="dist/CPA-X-${RELEASE_TAG}-source.zip" HEAD
+          git archive --format=tar.gz --prefix="$prefix" --output="dist/CPA-X-${RELEASE_TAG}-source.tar.gz" HEAD
+          cp docs/images/preview-dark.png "dist/CPA-X-${RELEASE_TAG}-preview-dark.png"
+          cp docs/images/preview-light.png "dist/CPA-X-${RELEASE_TAG}-preview-light.png"
+          cp docs/images/preview-mobile.png "dist/CPA-X-${RELEASE_TAG}-preview-mobile.png"
+          cd dist
+          sha256sum * > "CPA-X-${RELEASE_TAG}-SHA256SUMS.txt"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="RELEASE_NOTES_${RELEASE_TAG}.md"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          elif [[ -f "$notes" ]]; then
+            gh release create "$RELEASE_TAG" dist/* --title "CPA-X ${RELEASE_TAG}" --notes-file "$notes"
+          else
+            gh release create "$RELEASE_TAG" dist/* --title "CPA-X ${RELEASE_TAG}" --generate-notes
+          fi

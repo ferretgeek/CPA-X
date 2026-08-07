@@ -2,6 +2,10 @@
 
 [English](README.md) | 中文
 
+[![CI](https://github.com/ferretgeek/CPA-X/actions/workflows/ci.yml/badge.svg)](https://github.com/ferretgeek/CPA-X/actions/workflows/ci.yml)
+[![最新版本](https://img.shields.io/github/v/release/ferretgeek/CPA-X?display_name=tag)](https://github.com/ferretgeek/CPA-X/releases/latest)
+[![开源许可](https://img.shields.io/github/license/ferretgeek/CPA-X)](LICENSE)
+
 一个用于 **CLIProxyAPI** 的监控与管理面板，支持健康检查、资源监控、日志查看、更新管理、请求统计与定价显示等功能。
 
 v2.2.1 针对一次间歇 `502` 生产故障强化更新流程：部署成功必须由带认证的真实管理接口返回 HTTP `200`，失败版本会持久指数退避，匿名 GitHub 检查优先使用稳定 Release 跳转，并彻底停止废弃 usage 后台轮询。

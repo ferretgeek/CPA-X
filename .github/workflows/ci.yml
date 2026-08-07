@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        python-version:
+          - "3.11"
+          - "3.13"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Compile Python sources
+        run: python -m py_compile app.py scripts/auto_install.py scripts/doctor.py
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Check critical Python errors
+        run: python -m ruff check --select E9,F63,F7,F82 app.py scripts tests
+
+      - name: Check inline JavaScript syntax
+        shell: pwsh
+        run: |
+          $html = Get-Content -Raw -LiteralPath static/index.html
+          $match = [regex]::Match($html, '(?s)<script>(.*?)</script>')
+          if (-not $match.Success) { throw 'No inline script found in static/index.html' }
+          Set-Content -LiteralPath inline-script.js -Value $match.Groups[1].Value -Encoding utf8
+          node --check inline-script.js
+
+      - name: Scan for high-severity Python issues
+        if: runner.os == 'Linux' && matrix.python-version == '3.13'
+        run: python -m bandit -q -r app.py scripts -lll
+
+  container:
+    name: Container build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Build image
+        run: docker build --tag cpax-panel:ci .
