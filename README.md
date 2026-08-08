@@ -6,6 +6,8 @@ English | [中文](README_CN.md)
 [![Latest Release](https://img.shields.io/github/v/release/ferretgeek/CPA-X?display_name=tag)](https://github.com/ferretgeek/CPA-X/releases/latest)
 [![License](https://img.shields.io/github/license/ferretgeek/CPA-X)](LICENSE)
 
+[![CPA-X product preview](docs/images/social-preview.png)](https://github.com/ferretgeek/CPA-X/releases/latest)
+
 **AI-first repo**: this project is primarily designed to be deployed and operated by AI agents (not humans).
 
 - AI deployment guide: `AI_DEPLOY_CN.md`
