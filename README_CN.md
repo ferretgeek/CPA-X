@@ -80,7 +80,8 @@ python -m venv .venv
 # Linux / macOS
 source .venv/bin/activate
 
-pip install -r requirements.txt
+python -m pip install --upgrade "pip>=26.1.2"
+python -m pip install -r requirements.txt
 ```
 
 ### 3) 配置环境变量
@@ -128,8 +129,12 @@ http://127.0.0.1:8080
 
 最短路径（推荐用 compose）：
 ```bash
-docker compose up -d --build
+cp .env.docker.example .env.docker
+# 生成随机值并写入 CLIPROXY_PANEL_PANEL_ACCESS_KEY（至少 32 字符）
+docker compose --env-file .env.docker up -d --build
 ```
+
+Compose 默认只把端口发布到宿主机 `127.0.0.1`，并在访问密钥为空时拒绝启动。服务器远程访问请保持回环发布，通过带 TLS 的反向代理转发；不要把容器端口直接暴露到公网。
 
 如需“日志/配置/auth 文件”等功能，请按 `docker-compose.yml` 的注释挂载宿主机文件/目录，并把相关 `CLIPROXY_PANEL_*` 环境变量改成容器内路径。注意：这里的“配置”默认仅支持读取与校验，不会写回宿主机主配置。
 
@@ -148,8 +153,8 @@ docker compose up -d --build
 ## 安全提示
 - **不要把 `.env` 提交到仓库**（已在 `.gitignore` 中忽略）
 - 管理密钥、模型密钥等敏感字段请只放在 `.env`
-- 面板当前默认监听 `0.0.0.0`，方便局域网访问；如果只用于本机，建议把 `CLIPROXY_PANEL_BIND_HOST` 改成 `127.0.0.1`
-- 如需对面板加一道访问门槛，可设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`（`/api/*` 只接受 `X-Panel-Key`；浏览器 URL 参数仅用于首次写入本地存储并会立即移除，仍应避免在共享日志中使用）
+- 面板默认只监听 `127.0.0.1`。任何非回环监听都必须同时设置至少 32 字符的 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`，否则进程拒绝启动
+- 设置访问密钥后，`/api/*` 只接受 `X-Panel-Key`；浏览器 URL 参数仅用于首次写入本地存储并会立即移除，仍应避免在共享日志中使用
 - 跨域访问默认关闭；只有明确需要时才设置逗号分隔的 `CLIPROXY_PANEL_CORS_ORIGINS`
 - 前端已移除所有导出入口，避免把敏感内容通过浏览器下载链接暴露出去
 - 主配置写回默认关闭；如你非常确定要恢复，才在 `.env` 中显式设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`
@@ -157,14 +162,17 @@ docker compose up -d --build
 ## 开发验证
 
 ```bash
-pip install -r requirements-dev.txt
+python -m pip install --upgrade "pip>=26.1.2"
+python -m pip install -r requirements-dev.txt
 python -m pytest
-ruff check app.py scripts tests
+ruff check --select E9,F63,F7,F82 app.py scripts tests
 ```
 
 ## 社区与贡献
 
 - [参与贡献](CONTRIBUTING.md)
+- [安全策略](SECURITY.md)
+- [运维：架构、升级、备份、恢复与卸载](OPERATIONS.md)
 - [获取帮助](SUPPORT.md)
 - [社区行为准则](CODE_OF_CONDUCT.md)
 - [问题反馈](https://github.com/ferretgeek/CPA-X/issues/new/choose)

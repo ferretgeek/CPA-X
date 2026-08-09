@@ -39,7 +39,9 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: |
+          python -m pip install --upgrade "pip>=26.1.2"
+          python -m pip install -r requirements-dev.txt
 
       - name: Compile Python sources
         run: python -m py_compile app.py scripts/auto_install.py scripts/doctor.py
@@ -72,6 +74,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate Compose configuration
+        env:
+          CLIPROXY_PANEL_PANEL_ACCESS_KEY: ci-placeholder-panel-key-00000000
         run: docker compose config --quiet
 
       - name: Build image

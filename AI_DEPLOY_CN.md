@@ -30,7 +30,7 @@ systemctl restart cliproxy-panel
 容器部署的关键现实：
 
 - 容器里通常没有 systemd，也没有权限操作宿主机服务，因此**自动更新/服务控制功能默认不可用**（建议设置 `CLIPROXY_PANEL_AUTO_UPDATE_ENABLED=false`）。
-- 容器内服务要被端口映射访问，必须监听 `0.0.0.0`（因此需要 `CLIPROXY_PANEL_BIND_HOST=0.0.0.0`）。
+- 容器内服务要被端口映射访问，必须监听 `0.0.0.0`；同时必须配置至少 32 字符的 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`，且宿主端口默认只发布到 `127.0.0.1`。
 
 仓库已提供：
 
@@ -140,8 +140,9 @@ systemctl restart cliproxy-panel
 
 ## 6) 安全默认值（AI 不要破坏）
 
-- 当前默认 `CLIPROXY_PANEL_BIND_HOST=0.0.0.0`
-- 如需外网访问，建议同时设置 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`
+- 本机直接运行默认 `CLIPROXY_PANEL_BIND_HOST=127.0.0.1`
+- 非回环监听强制要求至少 32 字符的 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`，否则进程拒绝启动
+- 外网访问保持宿主机回环发布，通过带 TLS 的反向代理接入
 - 跨域 API 默认关闭；只为明确来源配置 `CLIPROXY_PANEL_CORS_ORIGINS`
 - 前端已移除导出入口，不要再帮用户恢复浏览器侧导出按钮
 - 主配置写回默认关闭；如用户明确要求恢复，才引导其在 `.env` 中设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`

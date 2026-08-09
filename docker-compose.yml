@@ -5,11 +5,12 @@ services:
     restart: unless-stopped
     init: true
     ports:
-      - "8080:8080"
+      - "${CLIPROXY_PANEL_PUBLISH_HOST:-127.0.0.1}:${CLIPROXY_PANEL_PUBLISHED_PORT:-8080}:8080"
     environment:
       # 容器内必须监听 0.0.0.0 才能让端口映射生效
       CLIPROXY_PANEL_BIND_HOST: "0.0.0.0"
       CLIPROXY_PANEL_PANEL_PORT: "8080"
+      CLIPROXY_PANEL_PANEL_ACCESS_KEY: "${CLIPROXY_PANEL_PANEL_ACCESS_KEY:?set a random panel access key with at least 32 characters}"
       CLIPROXY_PANEL_AUTO_UPDATE_ENABLED: "false"
       CLIPROXY_PANEL_LOG_TIMEZONE: "auto"
 
@@ -18,9 +19,6 @@ services:
       # Linux 需要 extra_hosts 把 host.docker.internal 映射到 host-gateway（见下方）
       CLIPROXY_PANEL_CLIPROXY_API_BASE: "http://host.docker.internal"
       CLIPROXY_PANEL_CLIPROXY_API_PORT: "8317"
-
-      # 可选：给面板 API 加一道访问密钥（推荐）
-      # CLIPROXY_PANEL_PANEL_ACCESS_KEY: "change-me"
 
       # 可选：提高 GitHub 限流额度（不配置也能工作）
       # CLIPROXY_PANEL_GITHUB_TOKEN: ""

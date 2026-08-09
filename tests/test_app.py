@@ -523,6 +523,23 @@ def test_panel_access_key_healthz_and_security_headers(monkeypatch):
     assert "default-src 'self'" in root.headers['Content-Security-Policy']
 
 
+def test_non_loopback_binding_requires_a_strong_panel_key(monkeypatch):
+    monkeypatch.setitem(app.CONFIG, 'bind_host', '127.0.0.1')
+    monkeypatch.setitem(app.CONFIG, 'panel_access_key', '')
+    app._validate_panel_security()
+
+    monkeypatch.setitem(app.CONFIG, 'bind_host', '0.0.0.0')
+    with pytest.raises(RuntimeError, match='at least 32 characters'):
+        app._validate_panel_security()
+
+    monkeypatch.setitem(app.CONFIG, 'panel_access_key', 'short-key')
+    with pytest.raises(RuntimeError, match='at least 32 characters'):
+        app._validate_panel_security()
+
+    monkeypatch.setitem(app.CONFIG, 'panel_access_key', 'x' * 32)
+    app._validate_panel_security()
+
+
 def test_force_update_requires_a_real_boolean():
     response = app.app.test_client().post('/api/update', json={'force': 'false'})
     assert response.status_code == 400

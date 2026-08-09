@@ -83,7 +83,8 @@ python -m venv .venv
 # Linux / macOS
 source .venv/bin/activate
 
-pip install -r requirements.txt
+python -m pip install --upgrade "pip>=26.1.2"
+python -m pip install -r requirements.txt
 ```
 
 #### 3) Configure environment variables
@@ -131,8 +132,12 @@ This repo includes:
 
 Shortest path (compose):
 ```bash
-docker compose up -d --build
+cp .env.docker.example .env.docker
+# Generate a random value of at least 32 characters for CLIPROXY_PANEL_PANEL_ACCESS_KEY
+docker compose --env-file .env.docker up -d --build
 ```
+
+Compose publishes the host port on `127.0.0.1` by default and refuses to start with an empty access key. For remote server access, keep the loopback publication and place a TLS reverse proxy in front of it; never expose the container port directly to the internet.
 
 If you need logs/config/auth file features, follow the comments in `docker-compose.yml` to mount host files/directories and point `CLIPROXY_PANEL_*` paths to container paths. Note that config access is read-only by default and does not write back to the host config.
 
@@ -152,8 +157,8 @@ This is a Linux-only feature. On Windows, it will fail gracefully without affect
 ## Security Notes
 - **Do not commit `.env` to the repository** (already in `.gitignore`)
 - Keep management keys and model keys only in `.env`
-- Default bind host is `0.0.0.0` for LAN-friendly deployment. If you only use the panel locally, set `CLIPROXY_PANEL_BIND_HOST=127.0.0.1`
-- For an extra protection layer, set `CLIPROXY_PANEL_PANEL_ACCESS_KEY` (`/api/*` accepts only the `X-Panel-Key` header; the browser URL parameter is consumed only for one-time local setup and immediately removed)
+- The default bind host is `127.0.0.1`. Any non-loopback binding also requires `CLIPROXY_PANEL_PANEL_ACCESS_KEY` with at least 32 characters or the process refuses to start
+- With an access key configured, `/api/*` accepts only the `X-Panel-Key` header; the browser URL parameter is consumed only for one-time local setup and immediately removed
 - Cross-origin API access is disabled by default; only set the comma-separated `CLIPROXY_PANEL_CORS_ORIGINS` when needed
 - All frontend export entries are removed to avoid exposing sensitive data through browser download links
 - Main-config writeback is disabled by default; only set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` if you explicitly accept that risk
@@ -161,14 +166,17 @@ This is a Linux-only feature. On Windows, it will fail gracefully without affect
 ## Development checks
 
 ```bash
-pip install -r requirements-dev.txt
+python -m pip install --upgrade "pip>=26.1.2"
+python -m pip install -r requirements-dev.txt
 python -m pytest
-ruff check app.py scripts tests
+ruff check --select E9,F63,F7,F82 app.py scripts tests
 ```
 
 ## Community
 
 - [Contributing guide](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Operations: architecture, upgrade, backup, restore, uninstall](OPERATIONS.md)
 - [Support](SUPPORT.md)
 - [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Report an issue](https://github.com/ferretgeek/CPA-X/issues/new/choose)

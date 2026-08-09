@@ -24,6 +24,7 @@ import hmac
 import random
 import signal
 import socket
+import ipaddress
 from datetime import datetime, timedelta, timezone
 from collections import deque
 from urllib.parse import urlsplit, urlunsplit
@@ -57,6 +58,7 @@ MANAGEMENT_AUTH_FAILURE_STATUSES = {401, 403}
 MAX_MODEL_USAGE_ENTRIES = 500
 BACKUP_RETENTION_COUNT = 2
 BACKUP_TS_PATTERN = re.compile(r'\.bak\.(\d{8}-\d{6}(?:-\d{6})?)$')
+PANEL_ACCESS_KEY_MIN_LENGTH = 32
 LOG_TIME_PATTERN = re.compile(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]')
 VERSION_PATTERN = re.compile(
     r'^[vV]?(?P<release>\d+(?:\.\d+){1,3})'
@@ -137,8 +139,8 @@ CONFIG = {
     'log_initial_scan_max_mb': 64,
     'log_clear_enabled': False,
     'update_require_checksum': True,
-    # 默认监听全部网卡，保持面板部署后可从局域网访问；如需仅本机访问，可显式设置为 127.0.0.1
-    'bind_host': '0.0.0.0',
+    # 安全默认值：本机直接运行只监听回环地址；非回环监听必须同时配置强访问密钥。
+    'bind_host': '127.0.0.1',
     'panel_access_key': '',
     # 逗号分隔的跨域来源；留空时仅允许浏览器同源访问。
     'cors_origins': '',
@@ -172,6 +174,30 @@ CONFIG_TYPES = {
 
 def _panel_access_key_expected() -> str:
     return str(CONFIG.get('panel_access_key', '') or '').strip()
+
+
+def _bind_host_is_loopback(value=None) -> bool:
+    host = str(value if value is not None else CONFIG.get('bind_host', '') or '').strip()
+    if not host:
+        return True
+    normalized = host.strip('[]').lower()
+    if normalized == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        # Unknown hostnames may resolve outside the machine, so fail closed.
+        return False
+
+
+def _validate_panel_security() -> None:
+    if _bind_host_is_loopback():
+        return
+    if len(_panel_access_key_expected()) < PANEL_ACCESS_KEY_MIN_LENGTH:
+        raise RuntimeError(
+            'Non-loopback panel binding requires '
+            f'CLIPROXY_PANEL_PANEL_ACCESS_KEY with at least {PANEL_ACCESS_KEY_MIN_LENGTH} characters'
+        )
 
 
 def _panel_access_key_provided() -> str:
@@ -623,7 +649,7 @@ def _normalize_runtime_config():
         CONFIG[key] = value if math.isfinite(value) and 0 <= value <= 1_000_000 else 0.0
 
     bind_host = str(CONFIG.get('bind_host') or '').strip()
-    CONFIG['bind_host'] = bind_host or '0.0.0.0'
+    CONFIG['bind_host'] = bind_host or '127.0.0.1'
     try:
         _timezone_from_setting(CONFIG.get('log_timezone', 'auto'))
     except ValueError as exc:
@@ -632,6 +658,7 @@ def _normalize_runtime_config():
 
 
 _normalize_runtime_config()
+_validate_panel_security()
 
 
 def is_config_write_enabled():
@@ -4306,8 +4333,10 @@ def perform_health_check(use_cache=True):
     results['checks'].append(management_check)
     results['checks_map']['management_key'] = management_check
 
-    bind_host = str(CONFIG.get('bind_host') or '')
-    exposed_without_key = bind_host not in {'127.0.0.1', '::1', 'localhost'} and not _panel_access_key_expected()
+    exposed_without_key = (
+        not _bind_host_is_loopback()
+        and len(_panel_access_key_expected()) < PANEL_ACCESS_KEY_MIN_LENGTH
+    )
     security_check = {
         'name': '面板访问保护',
         'status': 'warn' if exposed_without_key else 'pass',
@@ -5596,7 +5625,7 @@ def initialize_runtime():
 
 if __name__ == '__main__':
     initialize_runtime()
-    bind_host = str(CONFIG.get('bind_host') or '0.0.0.0')
+    bind_host = str(CONFIG.get('bind_host') or '127.0.0.1')
     panel_port = int(CONFIG['panel_port'])
     print(f'{PANEL_NAME} Panel v{PANEL_VERSION} started on {bind_host}:{panel_port}')
     if HAS_WAITRESS:

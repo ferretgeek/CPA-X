@@ -9,10 +9,10 @@ def test_doctor_env_write_is_atomic_and_respects_overwrite(tmp_path):
     env_path = tmp_path / '.env'
     env_path.write_text('CLIPROXY_PANEL_PANEL_PORT=9000\n', encoding='utf-8')
 
-    doctor.upsert_env_file(env_path, {'panel_port': '8080', 'bind_host': '0.0.0.0'}, False)
+    doctor.upsert_env_file(env_path, {'panel_port': '8080', 'bind_host': '127.0.0.1'}, False)
     content = env_path.read_text(encoding='utf-8')
     assert 'CLIPROXY_PANEL_PANEL_PORT=9000' in content
-    assert 'CLIPROXY_PANEL_BIND_HOST=0.0.0.0' in content
+    assert 'CLIPROXY_PANEL_BIND_HOST=127.0.0.1' in content
 
     doctor.upsert_env_file(env_path, {'panel_port': '8080'}, True)
     assert 'CLIPROXY_PANEL_PANEL_PORT=8080' in env_path.read_text(encoding='utf-8')
@@ -41,3 +41,10 @@ def test_doctor_resolves_relative_auth_directory(tmp_path):
     detected = doctor.detect_from_config(str(config))
     assert detected['cliproxy_api_port'] == '8317'
     assert Path(detected['auth_dir']) == (tmp_path / 'auths').resolve()
+
+
+def test_compose_defaults_to_loopback_and_requires_panel_key():
+    compose = (Path(__file__).parents[1] / 'docker-compose.yml').read_text(encoding='utf-8')
+    assert '${CLIPROXY_PANEL_PUBLISH_HOST:-127.0.0.1}' in compose
+    assert '${CLIPROXY_PANEL_PANEL_ACCESS_KEY:?' in compose
+    assert 'CLIPROXY_PANEL_PANEL_ACCESS_KEY: "change-me"' not in compose

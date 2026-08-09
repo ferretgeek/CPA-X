@@ -285,7 +285,7 @@ def main() -> int:
     result: Dict[str, str] = {}
 
     # Panel defaults (AI safe)
-    result["bind_host"] = "0.0.0.0"
+    result["bind_host"] = "127.0.0.1"
     result["panel_port"] = "8080"
     result["cliproxy_api_base"] = "http://127.0.0.1"
 

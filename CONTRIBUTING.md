@@ -24,14 +24,15 @@ source .venv/bin/activate
 # Windows PowerShell
 .venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt -r requirements-dev.txt
+python -m pip install --upgrade "pip>=26.1.2"
+python -m pip install -r requirements.txt -r requirements-dev.txt
 ```
 
 Copy `.env.example` to `.env` only for local testing. `.env` must never be committed.
 
 ## Project guardrails / 项目约束
 
-- Keep the default bind host deployable (`0.0.0.0`); operators can explicitly choose `127.0.0.1`.
+- Keep the safe default bind host at `127.0.0.1`; non-loopback bindings must require an access key of at least 32 characters.
 - Keep main-config writeback disabled by default.
 - Do not restore frontend export/download entries for sensitive operational data.
 - Docker mode is intended for monitoring; host service control and systemd auto-update belong to host deployments.

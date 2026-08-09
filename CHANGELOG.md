@@ -4,6 +4,11 @@ CPA-X follows semantic versioning. Detailed notes and downloadable packages are 
 
 CPA-X 遵循语义化版本。详细说明和可下载发行包统一发布在 GitHub Releases 页面。
 
+## Unreleased
+
+- Raise the development test floor to `pytest 9.0.3` and bootstrap `pip 26.1.2+` so fresh local and CI environments avoid currently known toolchain vulnerabilities.
+- 将开发测试下限提升到 `pytest 9.0.3`，并在本地与 CI 安装流程中先升级到 `pip 26.1.2+`，避免已知工具链漏洞。
+
 ## [2.2.1] - 2026-07-27
 
 Production repair release for intermittent `502` amplification: real management-endpoint update health checks, durable failed-version backoff, anonymous GitHub release fallback, and removal of deprecated background usage polling.

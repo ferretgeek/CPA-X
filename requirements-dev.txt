@@ -1,5 +1,5 @@
 -r requirements.txt
-pytest>=8.4,<9
+pytest>=9.0.3,<10
 pytest-cov>=6,<8
 ruff>=0.12,<1
 bandit>=1.8,<2
