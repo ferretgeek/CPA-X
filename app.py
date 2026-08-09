@@ -216,6 +216,11 @@ def _parse_bool(value):
     return False
 
 
+def _error_kind(exc):
+    """Return a non-sensitive diagnostic label without exposing exception text."""
+    return type(exc).__name__
+
+
 def _parse_float(value, default=0.0):
     if value is None:
         return default
@@ -250,7 +255,7 @@ def _load_dotenv():
                     value = value[1:-1]
                 values[key] = value
     except Exception as e:
-        print(f"Warning: failed to load .env: {e}")
+        print(f"Warning: failed to load .env ({_error_kind(e)})")
     return values
 
 
@@ -364,7 +369,7 @@ def _update_dotenv_values(updates):
             _atomic_write_text(env_path, '\n'.join(new_lines) + '\n', mode=0o600)
         return True
     except Exception as e:
-        print(f"Warning: failed to save .env: {e}")
+        print(f"Warning: failed to save .env ({_error_kind(e)})")
         return False
 
 
@@ -511,7 +516,7 @@ def _log_timezone(offset_seconds=None):
     try:
         configured, source = _timezone_from_setting(setting)
     except ValueError as exc:
-        print(f'Warning: {exc}; falling back to system local timezone')
+        print(f'Warning: timezone detection failed ({_error_kind(exc)}); falling back to system local timezone')
         configured, source = datetime.now().astimezone().tzinfo or UTC, 'local-fallback'
     if configured is not None:
         return configured, source
@@ -622,7 +627,7 @@ def _normalize_runtime_config():
     try:
         _timezone_from_setting(CONFIG.get('log_timezone', 'auto'))
     except ValueError as exc:
-        print(f'Warning: {exc}; using auto log timezone detection')
+        print(f'Warning: log timezone detection failed ({_error_kind(exc)}); using auto detection')
         CONFIG['log_timezone'] = 'auto'
 
 
@@ -839,7 +844,7 @@ def load_persistent_stats():
         print(f"Loaded persistent stats: accumulated={state['accumulated_stats']}, last_snapshot={state['last_snapshot']}")
         return True
     except Exception as e:
-        print(f"Warning: failed to load persistent stats: {e}")
+        print(f"Warning: failed to load persistent stats ({_error_kind(e)})")
         return False
 
 
@@ -876,7 +881,7 @@ def save_persistent_stats(force=False):
             save_persistent_stats._last_saved = now
             return True
         except Exception as e:
-            print(f"Warning: failed to save persistent stats: {e}")
+            print(f"Warning: failed to save persistent stats ({_error_kind(e)})")
             return False
 
 
@@ -887,7 +892,7 @@ def _persistent_stats_worker():
         try:
             save_persistent_stats()
         except Exception as e:
-            print(f"Warning: persistent stats worker error: {e}")
+            print(f"Warning: persistent stats worker error ({_error_kind(e)})")
 
 
 def start_persistent_stats_worker():
@@ -1075,7 +1080,7 @@ def load_usage_snapshot_from_disk():
             loaded = _load_json_file_limited(path, 32 * 1024 * 1024)
             return loaded if isinstance(loaded, dict) else None
     except Exception as e:
-        print(f"Warning: failed to load usage snapshot: {e}")
+        print(f"Warning: failed to load usage snapshot ({_error_kind(e)})")
     return None
 
 
@@ -1088,7 +1093,7 @@ def save_usage_snapshot(snapshot):
             _atomic_write_json(path, snapshot, mode=0o600)
             return True
         except Exception as e:
-            print(f"Warning: failed to save usage snapshot: {e}")
+            print(f"Warning: failed to save usage snapshot ({_error_kind(e)})")
             return False
 
 
@@ -1120,7 +1125,7 @@ def _ensure_parent_dir(path):
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         return True
     except Exception as e:
-        print(f"Warning: failed to create directory for {path}: {e}")
+        print(f"Warning: failed to create required directory ({_error_kind(e)})")
         return False
 
 
@@ -1142,7 +1147,7 @@ def load_log_stats_state():
             state['log_stats_loaded'] = True
         return True
     except Exception as e:
-        print(f"Warning: failed to load log stats: {e}")
+        print(f"Warning: failed to load log stats ({_error_kind(e)})")
         return False
 
 
@@ -1163,7 +1168,7 @@ def save_log_stats_state(force=False):
         _atomic_write_json(path, payload, mode=0o600)
         return True
     except Exception as e:
-        print(f"Warning: failed to save log stats: {e}")
+        print(f"Warning: failed to save log stats ({_error_kind(e)})")
         return False
 
 
@@ -1517,7 +1522,7 @@ def _fetch_openrouter_models(*, allow_network=True):
         cache.set(cache_key, models)
         return models
     except Exception as e:
-        print(f'Warning: failed to fetch openrouter models: {e}')
+        print(f'Warning: failed to fetch OpenRouter models ({_error_kind(e)})')
         cache.set('openrouter_models_error', True)
         return []
 
@@ -1787,7 +1792,7 @@ def load_quotes():
                     seen.add(key)
                     quotes.append(item)
         except Exception as e:
-            print(f"Warning: failed to load quotes from {path}: {e}")
+            print(f"Warning: failed to load quotes ({_error_kind(e)})")
     return quotes
 
 
@@ -1831,7 +1836,7 @@ class ResourceMonitor:
                         self._cpu_percent = cpu
                         self._cliproxy_usage = process_usage
             except Exception as e:
-                print(f'Warning: resource monitor sample failed: {e}')
+                print(f'Warning: resource monitor sample failed ({_error_kind(e)})')
             time.sleep(2)  # 每3秒更新一次(1秒采样+2秒等待)
 
     def _sample_cliproxy_process(self):
@@ -1901,8 +1906,10 @@ def run_cmd(args, timeout=60, cwd=None):
         return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
         return False, '', 'Command timed out'
+    except TypeError:
+        return False, '', 'run_cmd requires an argument sequence'
     except Exception as e:
-        return False, '', str(e)
+        return False, '', f'Command failed ({_error_kind(e)})'
 
 
 def is_linux():
@@ -1974,7 +1981,7 @@ def cleanup_binary_backups(binary_path, keep=None, max_total_bytes=None, max_age
                 'path': entry.path,
             })
     except Exception as e:
-        print(f"Warning: failed to scan binary backups: {e}")
+        print(f"Warning: failed to scan binary backups ({_error_kind(e)})")
         return []
 
     backups.sort(key=lambda item: item['created_at'], reverse=True)
@@ -1994,7 +2001,7 @@ def cleanup_binary_backups(binary_path, keep=None, max_total_bytes=None, max_age
             os.remove(backup['path'])
             deleted.append(backup['path'])
         except Exception as e:
-            print(f"Warning: failed to remove old backup {backup['path']}: {e}")
+            print(f"Warning: failed to remove old backup ({_error_kind(e)})")
     return deleted
 
 
@@ -2178,7 +2185,7 @@ def get_github_release_version(use_cache=True):
                 cache.set(cache_key, version)
                 return version
         except Exception as exc:
-            print(f'get_github_release_version {label} error: {exc}')
+            print(f'get_github_release_version {label} error ({_error_kind(exc)})')
 
     cache.set(cache_key, 'unknown')
     return 'unknown'
@@ -2717,7 +2724,7 @@ def _save_auto_update_failure_state_locked():
         _atomic_write_json(AUTO_UPDATE_STATE_PATH, _auto_update_failure_payload(), mode=0o600)
         return True
     except Exception as exc:
-        print(f'Warning: failed to save auto-update retry state: {exc}')
+        print(f'Warning: failed to save auto-update retry state ({_error_kind(exc)})')
         return False
 
 
@@ -2740,7 +2747,7 @@ def load_auto_update_failure_state():
             state['auto_update_failed_version'] = failed_version
         return True
     except Exception as exc:
-        print(f'Warning: failed to load auto-update retry state: {exc}')
+        print(f'Warning: failed to load auto-update retry state ({_error_kind(exc)})')
         return False
 
 
@@ -3192,7 +3199,7 @@ def perform_update(*, lock_acquired=False):
                     f'Rollback health check failed: {restart_error or "management endpoint unavailable"}'
                 )
             except Exception as exc:
-                result['details'].append(f'Rollback failed: {exc}')
+                result['details'].append(f'Rollback failed ({_error_kind(exc)})')
             return False
 
         result['details'].append('Starting service...')
@@ -3249,7 +3256,7 @@ def perform_update(*, lock_acquired=False):
         return True, result
 
     except Exception as exc:
-        result['message'] = f'Update error: {exc}'
+        result['message'] = f'Update failed ({_error_kind(exc)})'
         return False, result
     finally:
         if staged_target:
@@ -3320,7 +3327,7 @@ def update_from_github_release(binary_path=''):
             except Exception as e:
                 api_error = e
                 data = {}
-                print(f'Warning: failed to fetch authenticated release info via GitHub API: {e}')
+                print(f'Warning: authenticated GitHub release lookup failed ({_error_kind(e)})')
 
         resolved_tag = _decorate_version_tag((data.get('tag_name') or '') if isinstance(data, dict) else '')
         if _release_version_key(resolved_tag) is None:
@@ -3350,7 +3357,7 @@ def update_from_github_release(binary_path=''):
             tag_number = _normalize_release_version(tag_display)
             if not tag_number or _release_version_key(tag_display) is None:
                 if api_error:
-                    return False, f'Failed to fetch latest release info (GitHub API limited): {api_error}', None
+                    return False, f'Failed to fetch latest release info ({_error_kind(api_error)})', None
                 return False, 'Failed to resolve latest release tag', None
 
             asset_name = f'CLIProxyAPI_{tag_number}_linux_{goarch}.tar.gz'
@@ -3408,8 +3415,8 @@ def update_from_github_release(binary_path=''):
                         return False, 'Checksum mismatch (download may be corrupted)', resolved_tag or None
                 except Exception as e:
                     if require_checksum:
-                        return False, f'Checksum verification failed: {e}', resolved_tag or None
-                    print(f'Warning: checksum verification skipped: {e}')
+                        return False, f'Checksum verification failed ({_error_kind(e)})', resolved_tag or None
+                    print(f'Warning: checksum verification skipped ({_error_kind(e)})')
             elif require_checksum:
                 return False, 'Release checksum is unavailable', resolved_tag or None
 
@@ -3436,7 +3443,7 @@ def update_from_github_release(binary_path=''):
                 with tarfile.open(tar_path, 'r:gz') as tf:
                     _safe_extract(tf, tmpdir)
             except Exception as e:
-                return False, f'Extract failed: {e}', resolved_tag or None
+                return False, f'Extract failed ({_error_kind(e)})', resolved_tag or None
 
             def _looks_like_elf(path: str) -> bool:
                 try:
@@ -3529,7 +3536,7 @@ def update_from_github_release(binary_path=''):
         tag_for_message = resolved_tag or 'unknown'
         return True, f'Release {tag_for_message} verified for linux_{goarch}', resolved_tag or None
     except Exception as e:
-        return False, f'Release update error: {e}', None
+        return False, f'Release update failed ({_error_kind(e)})', None
 
 def auto_update_worker():
     first_check = True
@@ -3579,7 +3586,7 @@ def auto_update_worker():
                     f'threshold={CONFIG["idle_threshold_seconds"]}s'
                 )
         except Exception as e:
-            print(f'[{_utc_iso()}] Auto-update check failed: {e}')
+            print(f'[{_utc_iso()}] Auto-update check failed ({_error_kind(e)})')
 
 def parse_log_file(log_file, max_lines=100, limit=None):
     """解析日志文件（优化：Python原生读取，提取实际时间戳）"""
@@ -3752,7 +3759,7 @@ def parse_request_logs(max_lines=200, use_cache=True):
         cache.set(cache_key, result)
         return result
     except Exception as e:
-        print(f'parse_request_logs error: {e}')
+        print(f'parse_request_logs error ({_error_kind(e)})')
         return [], empty_stats
 
 def get_paths_info():
@@ -3778,8 +3785,8 @@ def load_cliproxy_config(use_cache=True):
     try:
         if os.path.getsize(config_path) > 2 * 1024 * 1024:
             return None, 'Config file exceeds the 2 MiB limit'
-    except OSError as exc:
-        return None, str(exc)
+    except OSError:
+        return None, 'Config file metadata is unavailable'
 
     if not HAS_YAML:
         # 没有yaml模块时返回原始内容
@@ -3788,8 +3795,8 @@ def load_cliproxy_config(use_cache=True):
                 result = ({'_raw': f.read()}, None)
                 cache.set(cache_key, result)
                 return result
-        except Exception as e:
-            return None, str(e)
+        except Exception:
+            return None, 'Config file read failed'
 
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -3799,8 +3806,8 @@ def load_cliproxy_config(use_cache=True):
             result = (config, None)
             cache.set(cache_key, result)
             return result
-    except Exception as e:
-        return None, str(e)
+    except Exception:
+        return None, 'Config file read failed'
 
 def validate_yaml_config(content):
     """验证YAML配置格式"""
@@ -3869,10 +3876,10 @@ def validate_yaml_config(content):
             'warnings': warnings,
             'config': config if len(errors) == 0 else None
         }
-    except yaml.YAMLError as e:
+    except yaml.YAMLError:
         return {
             'valid': False,
-            'errors': [f'YAML解析错误: {str(e)}'],
+            'errors': ['YAML解析错误'],
             'warnings': []
         }
 
@@ -4026,7 +4033,7 @@ def get_system_resources(use_cache=True):
         cache.set(cache_key, result)
         return result
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': f'系统资源读取失败 ({_error_kind(e)})'}
 
 def perform_health_check(use_cache=True):
     """执行健康检查（优化：带缓存）"""
@@ -4577,8 +4584,8 @@ def api_clear_cliproxy_logs():
                 f.flush()
                 os.fsync(f.fileno())
             cleared = True
-        except Exception as e:
-            errors.append(f"{log_file}: {e}")
+        except Exception:
+            errors.append("日志文件无法清空")
 
     _reset_log_stats_state()
     cache.invalidate('request_count_logs')
@@ -4639,8 +4646,9 @@ def api_update_history():
             'success': True,
             'history': response_history[-10:]  # 返回最近10条
         })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    except Exception as exc:
+        print(f"Warning: update history read failed ({_error_kind(exc)})")
+        return jsonify({'success': False, 'error': '更新历史读取失败'}), 500
 
 def record_update_history(version, success=True):
     """记录更新历史"""
@@ -4660,8 +4668,8 @@ def record_update_history(version, success=True):
             })
             _atomic_write_json(history_file, history[-50:], mode=0o600)
             return True
-        except Exception as e:
-            print(f"Error recording update history: {e}")
+        except Exception as exc:
+            print(f"Error recording update history ({_error_kind(exc)})")
             return False
 
 @app.route('/api/update', methods=['POST'])
@@ -4881,8 +4889,9 @@ def api_quote():
                 loaded_quotes = load_quotes()
                 cache.set('quotes_cache', loaded_quotes)
             return jsonify({'success': True, 'count': len(loaded_quotes)})
-        except Exception as e:
-            return jsonify({'success': False, 'error': str(e)}), 500
+        except Exception as exc:
+            print(f"Warning: quote save failed ({_error_kind(exc)})")
+            return jsonify({'success': False, 'error': '语录保存失败'}), 500
 
     quote = get_random_quote()
     return jsonify({'text': quote.get('text', ''), 'author': quote.get('author', '')})
@@ -4971,8 +4980,9 @@ def api_auth_files():
                     'modified': _utc_iso(datetime.fromtimestamp(stat.st_mtime, tz=UTC))
                 })
         return jsonify({'files': files, 'path': auth_dir})
-    except Exception as e:
-        return jsonify({'files': [], 'error': str(e)})
+    except Exception as exc:
+        print(f"Warning: auth file listing failed ({_error_kind(exc)})")
+        return jsonify({'files': [], 'error': '认证文件列表读取失败'}), 500
 
 
 def _save_cliproxy_config_content(content):
@@ -4997,7 +5007,8 @@ def _save_cliproxy_config_content(content):
         cache.invalidate('health_check')
         return True, None, backup_path if os.path.exists(backup_path) else None
     except Exception as exc:
-        return False, str(exc), None
+        print(f"Warning: configuration save failed ({_error_kind(exc)})")
+        return False, '配置保存失败', None
 
 @app.route('/api/config', methods=['GET'])
 def api_get_config():
@@ -5011,8 +5022,9 @@ def api_get_config():
         with open(config_path, 'r', encoding='utf-8') as f:
             content = f.read()
         return jsonify({'success': True, 'content': content, 'path': config_path})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+    except Exception as exc:
+        print(f"Warning: configuration read failed ({_error_kind(exc)})")
+        return jsonify({'success': False, 'error': '配置读取失败'}), 500
 
 @app.route('/api/config', methods=['POST'])
 def api_upload_config():
@@ -5040,8 +5052,9 @@ def api_upload_config():
                 'path': config_path,
                 'backup': backup_path
             })
-        except (OSError, UnicodeDecodeError) as e:
-            return jsonify({'success': False, 'error': str(e)}), 500
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"Warning: configuration upload failed ({_error_kind(exc)})")
+            return jsonify({'success': False, 'error': '配置上传失败'}), 500
 
     data = _request_json_object()
     if data and 'content' in data:
@@ -5055,8 +5068,9 @@ def api_upload_config():
                 'path': config_path,
                 'backup': backup_path
             })
-        except Exception as e:
-            return jsonify({'success': False, 'error': str(e)}), 500
+        except Exception as exc:
+            print(f"Warning: configuration update failed ({_error_kind(exc)})")
+            return jsonify({'success': False, 'error': '配置保存失败'}), 500
 
     return jsonify({'success': False, 'error': 'No file or content provided'}), 400
 
@@ -5082,8 +5096,9 @@ def api_restore_config():
             'message': 'Config restored from backup',
             'path': config_path
         })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+    except Exception as exc:
+        print(f"Warning: configuration restore failed ({_error_kind(exc)})")
+        return jsonify({'success': False, 'error': '配置恢复失败'}), 500
 
 # ==================== 新增API ====================
 
@@ -5143,8 +5158,9 @@ def api_reload_config():
                 })
 
             return jsonify({'success': False, 'message': 'Reload not supported on this platform'}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+    except Exception as exc:
+        print(f"Warning: configuration reload failed ({_error_kind(exc)})")
+        return jsonify({'success': False, 'error': '配置重载失败'}), 500
 
 @app.route('/api/config/routing', methods=['GET'])
 def api_get_routing():
@@ -5210,8 +5226,9 @@ def api_set_routing():
         cache.invalidate('health_check')
 
         return jsonify({'success': True, 'message': f'路由策略已设置为 {strategy}'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+    except Exception as exc:
+        print(f"Warning: routing update failed ({_error_kind(exc)})")
+        return jsonify({'success': False, 'error': '路由策略保存失败'}), 500
 
 @app.route('/api/health')
 def api_health():
@@ -5340,8 +5357,9 @@ def api_models():
             payload = _response_json_limited(resp, 8 * 1024 * 1024)
         models = payload.get('data', []) if isinstance(payload, dict) else []
         return jsonify({'success': True, 'models': models, 'count': len(models)})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e), 'models': []}), 502
+    except Exception as exc:
+        print(f"Warning: model listing failed ({_error_kind(exc)})")
+        return jsonify({'success': False, 'error': '模型列表读取失败', 'models': []}), 502
 
 @app.route('/api/test/connection', methods=['POST'])
 def api_test_connection():
@@ -5368,11 +5386,11 @@ def api_test_connection():
                 'latency': f'{latency:.1f}ms',
                 'message': f'{api_host}:{api_port} 正常',
             })
-        except Exception as e:
+        except Exception:
             results['tests'].append({
                 'name': 'API端口',
                 'success': False,
-                'message': str(e)
+                'message': 'API 端口连接失败'
             })
 
     if target in ['internet', 'all']:
@@ -5395,11 +5413,11 @@ def api_test_connection():
                 'latency': f'{latency:.1f}ms' if reachable else None,
                 'message': '更新源可访问' if reachable else f'更新源返回 HTTP {response.status_code}',
             })
-        except Exception as e:
+        except Exception:
             results['tests'].append({
                 'name': '外网连接',
                 'success': False,
-                'message': str(e)
+                'message': '更新源连接失败'
             })
 
     # 整体结果
@@ -5463,10 +5481,10 @@ def api_test_api():
             'body': response_json if response_json is not None else response_body[:2000],
             'truncated': truncated,
         })
-    except requests.RequestException as e:
+    except requests.RequestException:
         return jsonify({
             'success': False,
-            'error': f'连接失败: {e}'
+            'error': '连接失败'
         })
 
 @app.route('/api/export/<data_type>')
@@ -5532,7 +5550,7 @@ def background_tasks():
                 get_effective_pricing(allow_remote=True)
                 next_pricing_refresh = time.monotonic() + 6 * 3600
         except Exception as e:
-            print(f'[{_utc_iso()}] Health check failed: {e}')
+            print(f'[{_utc_iso()}] Health check failed ({_error_kind(e)})')
         time.sleep(60)
 
 
