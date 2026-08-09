@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CPA-X 管理面板 v2.2.1</title>
-    <meta name="theme-color" content="#0c1222">
+    <meta id="theme-color" name="theme-color" content="#17191d">
     <link rel="icon" href="/favicon.ico" sizes="any">
     <link rel="shortcut icon" href="/favicon.ico">
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
@@ -1146,7 +1146,7 @@
             --bg-gradient:
                 radial-gradient(circle at 12% -8%, rgba(49, 151, 203, 0.23), transparent 34rem),
                 radial-gradient(circle at 92% 12%, rgba(119, 87, 185, 0.16), transparent 30rem),
-                linear-gradient(145deg, #07111f 0%, #0a1626 48%, #101a2d 100%);
+                linear-gradient(145deg, #17191d 0%, #17191d 48%, #17191d 100%);
             --glass-bg: rgba(12, 27, 45, 0.86);
             --glass-bg-hover: rgba(20, 40, 62, 0.94);
             --glass-border: rgba(157, 192, 224, 0.18);
@@ -1197,6 +1197,44 @@
             --inner-surface-shadow: inset 0 1px 0 #ffffff, 0 7px 18px rgba(52, 76, 96, 0.08);
         }
 
+        [data-theme="light"][data-palette="mint"] {
+            --bg-gradient:
+                radial-gradient(circle at 8% 0%, rgba(70, 181, 145, 0.18), transparent 34rem),
+                radial-gradient(circle at 96% 8%, rgba(95, 164, 201, 0.12), transparent 30rem),
+                linear-gradient(145deg, #edf8f4 0%, #f8fcfa 52%, #e6f2ed 100%);
+            --glass-border-strong: rgba(21, 137, 101, 0.38);
+            --accent: #178766;
+            --accent-strong: #0f694f;
+            --success: #187c4c;
+            --purple: #537d73;
+            --req-number: #12745a;
+        }
+
+        [data-theme="light"][data-palette="rose"] {
+            --bg-gradient:
+                radial-gradient(circle at 10% 0%, rgba(221, 104, 141, 0.16), transparent 34rem),
+                radial-gradient(circle at 96% 8%, rgba(154, 120, 205, 0.13), transparent 30rem),
+                linear-gradient(145deg, #fff2f6 0%, #fffafb 52%, #f7edf4 100%);
+            --glass-border-strong: rgba(189, 75, 111, 0.34);
+            --accent: #b84e72;
+            --accent-strong: #913655;
+            --purple: #79559d;
+            --req-number: #aa4568;
+        }
+
+        [data-theme="light"][data-palette="sand"] {
+            --bg-gradient:
+                radial-gradient(circle at 10% 0%, rgba(213, 153, 83, 0.16), transparent 34rem),
+                radial-gradient(circle at 96% 8%, rgba(114, 154, 146, 0.11), transparent 30rem),
+                linear-gradient(145deg, #fbf5ea 0%, #fffdf8 52%, #f2eadf 100%);
+            --glass-border-strong: rgba(167, 109, 47, 0.34);
+            --accent: #9b672d;
+            --accent-strong: #785022;
+            --warning: #8d5d18;
+            --purple: #766185;
+            --req-number: #8f5e28;
+        }
+
         html, body {
             width: 100%;
             min-height: 100%;
@@ -1227,9 +1265,19 @@
             gap: 18px;
             border-width: 0 0 1px;
             border-radius: 0;
-            background: rgba(8, 20, 35, 0.9);
+            background: rgba(23, 25, 29, 0.94);
         }
         [data-theme="light"] .header { background: rgba(247, 250, 252, 0.92); }
+        .theme-select {
+            min-height: 34px;
+            padding: 0 30px 0 10px;
+            border: 1px solid var(--glass-border);
+            border-radius: 9px;
+            background: var(--glass-bg);
+            color: var(--text-primary);
+            font: 600 12px/1 var(--font-sans);
+            cursor: pointer;
+        }
         .logo-icon { width: 36px; height: 36px; border-radius: 11px; }
         .logo-text { font-size: 16px; letter-spacing: 0.08em; }
         .header-center { gap: clamp(10px, 1.5vw, 24px); }
@@ -1391,7 +1439,7 @@
 
     </style>
 </head>
-<body data-theme="dark">
+<body data-theme="dark" data-palette="sky">
     <div class="bg-orbs">
         <div class="orb orb-1"></div>
         <div class="orb orb-2"></div>
@@ -1433,6 +1481,12 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
                 刷新
             </button>
+            <select id="theme-select" class="theme-select" onchange="setLightPalette(this.value)" aria-label="选择浅色主题" title="选择浅色主题">
+                <option value="sky">天光</option>
+                <option value="mint">薄荷</option>
+                <option value="rose">蔷薇</option>
+                <option value="sand">暖砂</option>
+            </select>
             <button type="button" class="theme-btn" onclick="toggleTheme()" title="切换主题" aria-label="切换明暗主题">
                 <svg id="theme-icon" viewBox="0 0 24 24"><path d="M12 7a5 5 0 100 10 5 5 0 000-10zM12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
             </button>
@@ -1829,9 +1883,23 @@
         }
 
         // 主题
+        const LIGHT_PALETTES = new Set(['sky', 'mint', 'rose', 'sand']);
+
         function initTheme() {
-            const saved = localStorage.getItem('theme') || 'dark';
+            const saved = localStorage.getItem('theme') === 'light' ? 'light' : 'dark';
+            const paletteValue = localStorage.getItem('theme_palette');
+            const palette = LIGHT_PALETTES.has(paletteValue) ? paletteValue : 'sky';
             document.body.setAttribute('data-theme', saved);
+            document.body.setAttribute('data-palette', palette);
+            updateThemeIcon();
+        }
+
+        function setLightPalette(value) {
+            const palette = LIGHT_PALETTES.has(value) ? value : 'sky';
+            document.body.setAttribute('data-palette', palette);
+            document.body.setAttribute('data-theme', 'light');
+            localStorage.setItem('theme_palette', palette);
+            localStorage.setItem('theme', 'light');
             updateThemeIcon();
         }
 
@@ -1845,6 +1913,11 @@
 
         function updateThemeIcon() {
             const isDark = document.body.getAttribute('data-theme') === 'dark';
+            const palette = document.body.getAttribute('data-palette') || 'sky';
+            const select = document.getElementById('theme-select');
+            if (select) select.value = palette;
+            const themeColor = document.getElementById('theme-color');
+            if (themeColor) themeColor.setAttribute('content', isDark ? '#17191d' : getComputedStyle(document.body).getPropertyValue('--accent').trim());
             document.getElementById('theme-icon').innerHTML = isDark
                 ? '<path d="M12 7a5 5 0 100 10 5 5 0 000-10zM12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>'
                 : '<path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>';

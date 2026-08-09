@@ -30,7 +30,7 @@ v2.2.1 hardens production updates after an intermittent `502` incident: deployme
 | Safe auto-update | Online preparation, SHA-256 verification, atomic replacement, real management-endpoint health checks, rollback, and failed-version backoff. |
 | Usage and cost insights | Uses incremental logs for live request totals and preserves historical token/cost data from existing local compatibility snapshots. |
 | Long-running stability | Incremental log parsing, atomic persistence, outage backoff, and count/age/size backup caps. |
-| Readable interface | Self-contained responsive dark/light UI for desktop, tablet, mobile, and keyboard users. |
+| Readable interface | Self-contained responsive UI with Sky, Mint, Rose, and Sand light palettes plus a `#17191d` deep-gray mode. |
 | Flexible deployment | Linux/systemd, Windows, and Docker monitoring modes with auto-detection installers. |
 
 ## Preview
