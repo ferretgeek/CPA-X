@@ -1,4 +1,4 @@
-# CPA-X 管理面板（v2.2.1）
+# CPA-X — CLIProxyAPI 管理面板（v2.2.1）
 
 [English](README.md) | 中文
 

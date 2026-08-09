@@ -1,4 +1,4 @@
-# CPA-X Admin Panel (v2.2.1)
+# CPA-X — CLIProxyAPI Admin Dashboard (v2.2.1)
 
 English | [中文](README_CN.md)
 
