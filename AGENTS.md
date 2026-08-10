@@ -59,7 +59,7 @@
 - 面板自身
   - `CLIPROXY_PANEL_PANEL_PORT`：面板端口
   - `CLIPROXY_PANEL_BIND_HOST`：本机直接运行默认 `127.0.0.1`；只有明确需要时才改为非回环地址
-  - `CLIPROXY_PANEL_PANEL_ACCESS_KEY`：本机监听时可选；非回环监听时必须至少 32 字符。设置后 `/api/*` 只接受 `X-Panel-Key`。浏览器可在首次打开页面时用 `?panel_key=...` 写入本地存储，参数会立即从地址栏移除
+  - `CLIPROXY_PANEL_PANEL_ACCESS_KEY`：本机监听时可选；非回环监听时必须至少 32 字符。设置后 `/api/*` 只接受 `X-Panel-Key`。浏览器首次设置可用 `#panel_key=...` fragment 写入本地存储；禁止用会进入服务器与代理日志的查询参数
   - `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED`：主配置写回开关；默认 `false`，只有你明确接受风险时才改成 `true`
 
 - 费用估算（可选，但建议配置）

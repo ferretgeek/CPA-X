@@ -207,10 +207,61 @@ def _panel_access_key_provided() -> str:
     return str(request.headers.get('X-Panel-Key') or '').strip()
 
 
+def _request_host_is_allowed() -> bool:
+    """Prevent DNS rebinding when the panel is bound to loopback."""
+    if not _bind_host_is_loopback():
+        return True
+    raw_host = str(request.host or '').strip()
+    hostname = raw_host
+    if raw_host.startswith('['):
+        hostname = raw_host[1:].split(']', 1)[0]
+    elif raw_host.count(':') == 1:
+        hostname = raw_host.rsplit(':', 1)[0]
+    normalized = hostname.strip('[]').lower()
+    if normalized == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _browser_mutation_is_allowed() -> bool:
+    if request.method not in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        return True
+    fetch_site = str(request.headers.get('Sec-Fetch-Site') or '').lower()
+    origin = str(request.headers.get('Origin') or '').strip()
+    browser_context = bool(fetch_site or origin or request.headers.get('Sec-Fetch-Mode'))
+    if not browser_context:
+        # Authenticated command-line clients cannot be driven by a cross-site form.
+        return True
+    if fetch_site not in {'', 'same-origin', 'same-site', 'none'}:
+        return False
+    if request.headers.get('X-Panel-CSRF') != '1':
+        return False
+    if not origin:
+        return fetch_site in {'same-origin', 'same-site'}
+    try:
+        parsed = urlsplit(origin)
+        expected = urlsplit(request.host_url)
+        return (
+            parsed.scheme in {'http', 'https'}
+            and parsed.scheme == expected.scheme
+            and parsed.hostname == expected.hostname
+            and parsed.port == expected.port
+        )
+    except ValueError:
+        return False
+
+
 @app.before_request
 def _enforce_panel_access_key():
+    if not _request_host_is_allowed():
+        return jsonify({'success': False, 'error': 'Invalid Host'}), 400
     if request.path == '/api/healthz':
         return None
+    if request.path.startswith('/api') and not _browser_mutation_is_allowed():
+        return jsonify({'success': False, 'error': 'Cross-site mutation rejected'}), 403
     expected = _panel_access_key_expected()
     if not expected:
         return None

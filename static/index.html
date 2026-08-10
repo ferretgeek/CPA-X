@@ -1933,6 +1933,7 @@
 	        async function api(endpoint, opts = {}) {
 	            const headers = { Accept: 'application/json', ...(opts.headers || {}) };
 	            if (opts.body != null && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+	            if (opts.method && !['GET', 'HEAD'].includes(String(opts.method).toUpperCase())) headers['X-Panel-CSRF'] = '1';
 	            const panelKey = (localStorage.getItem('panel_key') || '').trim();
 	            if (panelKey) headers['X-Panel-Key'] = panelKey;
 
@@ -1972,11 +1973,13 @@
 	        function initPanelKeyFromURL() {
 	            try {
 	                const url = new URL(window.location.href);
-	                const key = (url.searchParams.get('panel_key') || '').trim();
+	                const fragment = new URLSearchParams(url.hash.replace(/^#/, ''));
+	                const key = (fragment.get('panel_key') || '').trim();
 	                if (!key) return;
 	                localStorage.setItem('panel_key', key);
-	                url.searchParams.delete('panel_key');
-	                history.replaceState({}, '', url.pathname + (url.search ? url.search : '') + url.hash);
+	                fragment.delete('panel_key');
+	                const hash = fragment.toString();
+	                history.replaceState({}, '', url.pathname + url.search + (hash ? `#${hash}` : ''));
 	            } catch (e) {}
 	        }
 

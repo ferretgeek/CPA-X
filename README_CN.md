@@ -154,7 +154,8 @@ Compose 默认只把端口发布到宿主机 `127.0.0.1`，并在访问密钥为
 - **不要把 `.env` 提交到仓库**（已在 `.gitignore` 中忽略）
 - 管理密钥、模型密钥等敏感字段请只放在 `.env`
 - 面板默认只监听 `127.0.0.1`。任何非回环监听都必须同时设置至少 32 字符的 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`，否则进程拒绝启动
-- 设置访问密钥后，`/api/*` 只接受 `X-Panel-Key`；浏览器 URL 参数仅用于首次写入本地存储并会立即移除，仍应避免在共享日志中使用
+- 设置访问密钥后，`/api/*` 只接受 `X-Panel-Key`；浏览器首次设置只使用不会发给服务器的 `#panel_key=...` fragment，禁止使用查询参数
+- 回环模式只接受 localhost/回环字面量 Host 并拒绝跨站浏览器修改请求；Linux 安装器从 root 所有的 `/opt/cliproxy-panel/releases/` 快照运行 systemd
 - 跨域访问默认关闭；只有明确需要时才设置逗号分隔的 `CLIPROXY_PANEL_CORS_ORIGINS`
 - 前端已移除所有导出入口，避免把敏感内容通过浏览器下载链接暴露出去
 - 主配置写回默认关闭；如你非常确定要恢复，才在 `.env` 中显式设置 `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true`

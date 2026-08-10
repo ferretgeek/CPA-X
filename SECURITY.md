@@ -27,5 +27,8 @@ Include the affected version, deployment mode, minimal reproduction, and expecte
 - 本地直接运行默认监听 `127.0.0.1`。
 - 非回环监听必须配置至少 32 字符的面板访问密钥。
 - Docker 默认只发布到宿主机回环地址，并强制访问密钥。
+- 回环监听只接受 localhost/回环字面量 Host；浏览器修改请求还需通过同源元数据与自定义 CSRF 头校验。
+- Linux systemd 只从 root 所有、普通用户不可写的 `/opt/cliproxy-panel/releases/` 快照运行。
+- 一次性面板密钥只允许放在 URL fragment（`#panel_key=...`），不得放入查询字符串。
 - 远程访问必须经过 HTTPS 反向代理，不要直接暴露应用端口。
 - 除非部署者明确接受风险，否则保持主配置写回关闭。

@@ -523,6 +523,34 @@ def test_panel_access_key_healthz_and_security_headers(monkeypatch):
     assert "default-src 'self'" in root.headers['Content-Security-Policy']
 
 
+def test_loopback_binding_rejects_dns_rebinding_and_cross_site_posts(monkeypatch):
+    monkeypatch.setitem(app.CONFIG, 'bind_host', '127.0.0.1')
+    monkeypatch.setitem(app.CONFIG, 'panel_access_key', '')
+    client = app.app.test_client()
+    assert client.get('/api/healthz', headers={'Host': 'attacker.example'}).status_code == 400
+    blocked = client.post(
+        '/api/stats/clear',
+        headers={
+            'Host': '127.0.0.1',
+            'Origin': 'https://attacker.example',
+            'Sec-Fetch-Site': 'cross-site',
+        },
+        json={},
+    )
+    assert blocked.status_code == 403
+    allowed = client.post(
+        '/api/stats/clear',
+        headers={
+            'Host': '127.0.0.1',
+            'Origin': 'http://127.0.0.1',
+            'Sec-Fetch-Site': 'same-origin',
+            'X-Panel-CSRF': '1',
+        },
+        json={},
+    )
+    assert allowed.status_code == 200
+
+
 def test_non_loopback_binding_requires_a_strong_panel_key(monkeypatch):
     monkeypatch.setitem(app.CONFIG, 'bind_host', '127.0.0.1')
     monkeypatch.setitem(app.CONFIG, 'panel_access_key', '')
@@ -587,3 +615,5 @@ def test_frontend_is_self_contained_accessible_and_responsive():
         )
     ids = [node.get('id') for node in soup.find_all(attrs={'id': True})]
     assert len(ids) == len(set(ids))
+    assert "url.searchParams.get('panel_key')" not in html
+    assert "new URLSearchParams(url.hash" in html

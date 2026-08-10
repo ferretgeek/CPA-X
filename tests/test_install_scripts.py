@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -48,3 +48,14 @@ def test_compose_defaults_to_loopback_and_requires_panel_key():
     assert '${CLIPROXY_PANEL_PUBLISH_HOST:-127.0.0.1}' in compose
     assert '${CLIPROXY_PANEL_PANEL_ACCESS_KEY:?' in compose
     assert 'CLIPROXY_PANEL_PANEL_ACCESS_KEY: "change-me"' not in compose
+
+
+def test_systemd_unit_runs_only_from_root_owned_staging_path():
+    runtime = PurePosixPath('/opt/cliproxy-panel/releases/20260811T000000Z-100')
+    unit = auto_install.render_systemd_unit(
+        runtime, str(runtime / '.venv/bin/python')
+    )
+    assert f'WorkingDirectory="{runtime}"' in unit
+    assert f'ExecStart="{runtime}/.venv/bin/python" "{runtime}/app.py"' in unit
+    assert 'ProtectSystem=strict' in unit
+    assert 'ReadWritePaths=/opt/cliproxy-panel' in unit

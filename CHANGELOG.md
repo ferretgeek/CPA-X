@@ -8,6 +8,8 @@ CPA-X 遵循语义化版本。详细说明和可下载发行包统一发布在 G
 
 - Raise the development test floor to `pytest 9.0.3` and bootstrap `pip 26.1.2+` so fresh local and CI environments avoid currently known toolchain vulnerabilities.
 - 将开发测试下限提升到 `pytest 9.0.3`，并在本地与 CI 安装流程中先升级到 `pip 26.1.2+`，避免已知工具链漏洞。
+- Harden loopback Host validation and browser mutation checks, move one-time panel-key setup from query strings to URL fragments, and stage Linux systemd runtime files in a root-owned release directory.
+- 加固回环 Host 与浏览器修改请求校验，把一次性面板密钥从查询参数迁移到 URL fragment，并让 Linux systemd 只运行 root 所有的发布快照。
 
 ## [2.2.1] - 2026-07-27
 

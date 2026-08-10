@@ -158,7 +158,8 @@ This is a Linux-only feature. On Windows, it will fail gracefully without affect
 - **Do not commit `.env` to the repository** (already in `.gitignore`)
 - Keep management keys and model keys only in `.env`
 - The default bind host is `127.0.0.1`. Any non-loopback binding also requires `CLIPROXY_PANEL_PANEL_ACCESS_KEY` with at least 32 characters or the process refuses to start
-- With an access key configured, `/api/*` accepts only the `X-Panel-Key` header; the browser URL parameter is consumed only for one-time local setup and immediately removed
+- With an access key configured, `/api/*` accepts only the `X-Panel-Key` header; one-time browser setup uses the non-transmitted `#panel_key=...` fragment, never a query parameter
+- Loopback mode accepts only literal localhost/loopback Host values and rejects cross-site browser mutations. The Linux installer runs systemd from a root-owned `/opt/cliproxy-panel/releases/` snapshot.
 - Cross-origin API access is disabled by default; only set the comma-separated `CLIPROXY_PANEL_CORS_ORIGINS` when needed
 - All frontend export entries are removed to avoid exposing sensitive data through browser download links
 - Main-config writeback is disabled by default; only set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` if you explicitly accept that risk
