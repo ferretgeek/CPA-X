@@ -1,187 +1,170 @@
-# CPA-X — CLIProxyAPI Admin Dashboard (v2.2.1)
+[![CPA-X 管理面板](docs/images/social-preview.png)](https://github.com/ferretgeek/cliproxyapi-dashboard/releases/latest)
 
-English | [中文](README_CN.md)
+# CPA-X · CLIProxyAPI 管理面板
 
-[![CI](https://github.com/ferretgeek/CPA-X/actions/workflows/ci.yml/badge.svg)](https://github.com/ferretgeek/CPA-X/actions/workflows/ci.yml)
-[![Latest Release](https://img.shields.io/github/v/release/ferretgeek/CPA-X?display_name=tag)](https://github.com/ferretgeek/CPA-X/releases/latest)
-[![License](https://img.shields.io/github/license/ferretgeek/CPA-X)](LICENSE)
+中文 · [English](README_EN.md)
 
-[![CPA-X product preview](docs/images/social-preview.png)](https://github.com/ferretgeek/CPA-X/releases/latest)
+[![CI](https://github.com/ferretgeek/cliproxyapi-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/ferretgeek/cliproxyapi-dashboard/actions/workflows/ci.yml)
+[![最新版本](https://img.shields.io/github/v/release/ferretgeek/cliproxyapi-dashboard?display_name=tag&label=%E7%89%88%E6%9C%AC)](https://github.com/ferretgeek/cliproxyapi-dashboard/releases/latest)
+[![开源许可](https://img.shields.io/github/license/ferretgeek/cliproxyapi-dashboard?label=%E8%AE%B8%E5%8F%AF)](LICENSE)
 
-**AI-first repo**: this project is primarily designed to be deployed and operated by AI agents (not humans).
+> 一页看清：哪个账号还活着、token 花在了哪、这次升级到底成没成。
 
-- AI deployment guide: `AI_DEPLOY_CN.md`
-- Agent instructions: `AGENTS.md`
-- Release notes: `RELEASE_NOTES_v2.2.1.md`
-- Version history: `CHANGELOG.md`
-- Ready-to-download packages: [Latest GitHub Release](https://github.com/ferretgeek/CPA-X/releases/latest)
+## 这是给谁的
 
-A monitoring and management panel for **CLIProxyAPI**, featuring health checks, resource monitoring, logs, update management, request statistics, and pricing display.
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 能把 Codex、Claude Code、Gemini CLI 的订阅变成标准 API 接口，很多人用它统一调度手上的几个账号。
 
-v2.2.1 hardens production updates after an intermittent `502` incident: deployment success now requires the authenticated management endpoint to return HTTP `200`, failed releases use durable exponential backoff, anonymous GitHub checks prefer stable release redirects, and deprecated usage polling is no longer started.
+把它跑起来不难。难的是跑起来之后：
 
-> Current security posture: **all frontend export entries are removed, and main-config writeback is disabled by default**. The config area is read-only / validate-only unless you explicitly set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` in `.env`.
+- 请求突然开始失败，是哪个账号被限流了？
+- 这个月的 token 到底花在哪个模型、哪个账号上？折算成钱是多少？
+- 上游发了新版本，我升级了——服务现在还活着吗？如果没活，怎么退回去？
 
-## Highlights
+CPA-X 就是回答这三个问题的。它读 CLIProxyAPI 自己的日志和管理接口，把状态、用量、成本、日志和升级收进一个页面；不接管你的流量，也不碰你的模型请求。
 
-| Capability | What it provides |
-| --- | --- |
-| Cross-time-zone reliability | Infers offset-less log time, emits UTC/RFC 3339 APIs, and supports split host/container zones. |
-| Safe auto-update | Online preparation, SHA-256 verification, atomic replacement, real management-endpoint health checks, rollback, and failed-version backoff. |
-| Usage and cost insights | Uses incremental logs for live request totals and preserves historical token/cost data from existing local compatibility snapshots. |
-| Long-running stability | Incremental log parsing, atomic persistence, outage backoff, and count/age/size backup caps. |
-| Readable interface | Self-contained responsive UI with Sky, Mint, Rose, and Sand light palettes plus a `#17191d` deep-gray mode. |
-| Flexible deployment | Linux/systemd, Windows, and Docker monitoring modes with auto-detection installers. |
+## 界面
 
-## Preview
+| 深色 | 浅色 |
+|---|---|
+| ![深色主题](docs/images/preview-dark.png) | ![浅色主题](docs/images/preview-light.png) |
 
-### Dark Theme
-![CPA-X Dark Preview](docs/images/preview-dark.png)
+<p align="center">
+  <img src="docs/images/preview-mobile.png" alt="手机端布局" width="320" />
+</p>
 
-### Light Theme
-![CPA-X Light Preview](docs/images/preview-light.png)
+## 它能做什么
 
-### Mobile Layout
-![CPA-X Mobile Preview](docs/images/preview-mobile.png)
+- **看状态** — 服务是否在跑、CPU / 内存 / 磁盘、上游版本与本地版本、各账号可用性。
+- **看用量和花费** — 实时请求量、按模型和账号拆分的 token 消耗，并按可配置的单价折算成本（默认可从 OpenRouter 自动同步价格，也可以关掉自己填）。
+- **看日志** — 增量解析、按级别与关键字筛选，不用 SSH 进去 `tail`。
+- **管升级** — 检查新版本、下载、校验、替换、重启、健康确认，失败自动回滚。
+- **管服务** — Linux 上直接启停重启 systemd 服务（Windows 与 Docker 下这部分会明确禁用，而不是假装成功）。
+- **看配置** — 配置区默认只读、只做校验。回写主配置需要你自己开开关。
+- **换主题** — 天空、薄荷、玫瑰、沙色四套浅色配色 + `#17191d` 深灰暗色，右上角切换并记住选择；手机上是完整可用而不只是能打开。
 
-## Requirements
-- **Recommended: Linux** (panel includes `systemctl` functionality)
-- Python 3.11+
-- Access to CLIProxyAPI management interface (default `http://127.0.0.1:8317`)
+## 三步跑起来
 
-> Windows is also supported, but service control and auto-update features (systemd-related) are unavailable.
+需要 Python 3.11+，以及能访问 CLIProxyAPI 的管理接口（默认 `http://127.0.0.1:8317`）。**推荐 Linux**——服务控制和自动升级依赖 systemd。
 
-## Quick Installation
-
-### Option 1: One-Click Install (Recommended)
 ```bash
-# Linux (auto-registers systemd service; installer best-effort auto-detects and fills `.env`)
+# Linux：一条命令装好并注册 systemd 服务
 bash scripts/install.sh
 
-# Optional: run auto-detect again (recommended)
+# 让它自己探测 CLIProxyAPI 的目录、日志和端口，写进 .env
 python3 scripts/doctor.py --write-env
 ```
 
+Windows：
+
 ```powershell
-# Windows (background start)
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
 
-### Option 2: Manual Installation
+然后打开 `http://127.0.0.1:8080`。
 
-#### 1) Clone the repository
-```bash
-git clone https://github.com/ferretgeek/CPA-X.git
-cd CPA-X
-```
+手动安装、Docker Compose、反向代理、全部环境变量与常见问题，见 [部署与运维手册](OPERATIONS.md)。
 
-#### 2) Create virtual environment and install dependencies
+<details>
+<summary>手动安装（不想用脚本的话）</summary>
+
+<br />
+
 ```bash
+git clone https://github.com/ferretgeek/cliproxyapi-dashboard.git
+cd cliproxyapi-dashboard
+
 python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# Linux / macOS
-source .venv/bin/activate
-
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 python -m pip install --upgrade "pip>=26.1.2"
 python -m pip install -r requirements.txt
-```
 
-#### 3) Configure environment variables
-Copy the example file and modify as needed:
-```bash
-# Windows
-copy .env.example .env
-# Linux / macOS
-cp .env.example .env
-```
+cp .env.example .env               # Windows: copy .env.example .env
+# 编辑 .env，至少填对 CLIProxyAPI 的目录、日志路径和管理接口地址
 
-Key configurations:
-- `CLIPROXY_PANEL_CLIPROXY_DIR` / `CLIPROXY_PANEL_CLIPROXY_CONFIG`
-- `CLIPROXY_PANEL_CLIPROXY_LOG`
-- `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `CLIPROXY_PANEL_CLIPROXY_API_PORT`
-- `CLIPROXY_PANEL_MANAGEMENT_KEY` / `CLIPROXY_PANEL_MODELS_API_KEY` (if upstream keys are enabled)
-- `CLIPROXY_PANEL_CLIPROXY_SERVICE` / `CLIPROXY_PANEL_CLIPROXY_BINARY` (required for auto-update)
-- `CLIPROXY_PANEL_LOG_TIMEZONE` (defaults to `auto`; also accepts `UTC`, `+08:00`, or IANA zones such as `Asia/Shanghai`)
-- `CLIPROXY_PANEL_BACKUP_*` / `CLIPROXY_PANEL_UPDATE_REQUIRE_CHECKSUM` (backup caps and update verification)
-- `CLIPROXY_PANEL_AUTO_UPDATE_FAILURE_BACKOFF_*` / `CLIPROXY_PANEL_SERVICE_HEALTH_TIMEOUT_SECONDS` (failed-version backoff and real management-endpoint health checks)
-- `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED` (defaults to `false`; only enable main-config writeback if you explicitly accept that risk)
-- `CLIPROXY_PANEL_GITHUB_TOKEN` (optional: higher GitHub rate limit, fewer `latest=unknown`)
-- `CLIPROXY_PANEL_PRICING_*` (optional: cost estimation; defaults can be auto-synced from OpenRouter, disable via `CLIPROXY_PANEL_PRICING_AUTO_ENABLED=false`)
-- `CLIPROXY_PANEL_QUOTES_PATH` (optional supplemental library; repository-root `X.txt` is always loaded and currently contains 181 entries)
-
-#### 4) Start the panel
-```bash
 python app.py
 ```
 
-Open your browser and visit:
-```
-http://127.0.0.1:8080
-```
+关键变量（完整列表在 `.env.example` 里都有注释）：
 
-## Docker / Container Deployment (Optional)
+| 变量 | 作用 |
+|---|---|
+| `CLIPROXY_PANEL_CLIPROXY_DIR` / `_CONFIG` / `_LOG` | CLIProxyAPI 的安装目录、配置和日志在哪 |
+| `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `_API_PORT` | 管理接口地址与端口 |
+| `CLIPROXY_PANEL_MANAGEMENT_KEY` / `_MODELS_API_KEY` | 上游启用了鉴权时需要 |
+| `CLIPROXY_PANEL_CLIPROXY_SERVICE` / `_BINARY` | 自动升级必须知道服务名和二进制路径 |
+| `CLIPROXY_PANEL_LOG_TIMEZONE` | 默认 `auto`，也接受 `UTC`、`+08:00` 或 `Asia/Shanghai` |
+| `CLIPROXY_PANEL_PANEL_ACCESS_KEY` | 非回环监听时**必填**，至少 32 位 |
+| `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED` | 默认 `false`；只有你明确接受风险才打开主配置回写 |
 
-Good for: monitoring & read-only operations (status/stats/models/logs/config reads).  
-Not good for: auto-update / service control (containers typically don't have systemd or host privileges).
+</details>
 
-This repo includes:
-- `Dockerfile`
-- `docker-compose.yml`
-- `.env.docker.example`
+<details>
+<summary>Docker（适合只做监控和只读运维）</summary>
 
-Shortest path (compose):
+<br />
+
+容器里一般没有 systemd 和宿主权限，所以**自动升级和服务控制在 Docker 下不可用**；状态、统计、模型、日志和配置读取都正常。
+
 ```bash
 cp .env.docker.example .env.docker
-# Generate a random value of at least 32 characters for CLIPROXY_PANEL_PANEL_ACCESS_KEY
+# 给 CLIPROXY_PANEL_PANEL_ACCESS_KEY 生成一个至少 32 位的随机值
 docker compose --env-file .env.docker up -d --build
 ```
 
-Compose publishes the host port on `127.0.0.1` by default and refuses to start with an empty access key. For remote server access, keep the loopback publication and place a TLS reverse proxy in front of it; never expose the container port directly to the internet.
+Compose 默认只把端口发布在 `127.0.0.1`，访问密钥为空时直接拒绝启动。远程访问请保持回环发布，前面挂一层 TLS 反向代理，不要把容器端口直接暴露到公网。
 
-If you need logs/config/auth file features, follow the comments in `docker-compose.yml` to mount host files/directories and point `CLIPROXY_PANEL_*` paths to container paths. Note that config access is read-only by default and does not write back to the host config.
+</details>
 
-## FAQ
+## 技术上值得一提的地方
 
-### 1) Page loads but data is empty
-Check if CLIProxy is running and verify that `CLIPROXY_PANEL_CLIPROXY_API_BASE/PORT` in `.env` points to the correct address.
+**升级不会假成功。** 这是这个项目最花心思的一块，起因是一次间歇性 `502` 生产故障。现在的流程是：在线准备 → 校验 SHA-256 → 原子替换 → 重启 → **真的去打一次带认证的管理接口，拿到 HTTP 200 才算成功**。失败的版本会进入持久化的指数退避（重启面板也不会忘），并回滚到上一个可用版本。匿名的 GitHub 版本检查优先走稳定的 Release 跳转，避免频繁触发速率限制。
 
-Current CLIProxyAPI releases no longer expose the legacy usage management endpoints. CPA-X no longer polls them in the background: live request totals come from incremental log parsing, while token/cost history already stored before the upgrade remains available from local compatibility snapshots without repeated upstream `404` requests.
+**日志是增量解析的。** 不重读整个文件，长期运行下内存和 CPU 都是平的；状态持久化走原子写入，上游不可用时退避重试，备份按数量、时长和体积三重上限自动淘汰。
 
-### 2) Health check timeout
-Use the unauthenticated minimal `/api/healthz` endpoint for container/load-balancer liveness checks. Use `/api/health` for full diagnostics.
+**时区是推断出来的，不是猜的。** CLIProxyAPI 的日志时间可能不带偏移量，宿主机和容器时区还可能不一致。面板会反推出正确的时刻，所有 API 统一输出 UTC / RFC 3339，界面再按你设定的时区渲染。
 
-### 3) systemd features not working
-This is a Linux-only feature. On Windows, it will fail gracefully without affecting panel startup.
+**默认关掉危险入口。** 前端所有导出入口已移除（避免通过浏览器下载链接泄露敏感数据）；主配置回写默认关闭；跨域访问默认禁止；回环模式只接受字面 localhost / 回环 Host 并拒绝跨站变更请求；Linux 安装器从 root 所有的 `/opt/cliproxy-panel/releases/` 快照运行 systemd 服务。
 
-## Security Notes
-- **Do not commit `.env` to the repository** (already in `.gitignore`)
-- Keep management keys and model keys only in `.env`
-- The default bind host is `127.0.0.1`. Any non-loopback binding also requires `CLIPROXY_PANEL_PANEL_ACCESS_KEY` with at least 32 characters or the process refuses to start
-- With an access key configured, `/api/*` accepts only the `X-Panel-Key` header; one-time browser setup uses the non-transmitted `#panel_key=...` fragment, never a query parameter
-- Loopback mode accepts only literal localhost/loopback Host values and rejects cross-site browser mutations. The Linux installer runs systemd from a root-owned `/opt/cliproxy-panel/releases/` snapshot.
-- Cross-origin API access is disabled by default; only set the comma-separated `CLIPROXY_PANEL_CORS_ORIGINS` when needed
-- All frontend export entries are removed to avoid exposing sensitive data through browser download links
-- Main-config writeback is disabled by default; only set `CLIPROXY_PANEL_CONFIG_WRITE_ENABLED=true` if you explicitly accept that risk
+**顺手做了给 AI Agent 的部署手册。** [`AI_DEPLOY_CN.md`](AI_DEPLOY_CN.md) 和 [`AGENTS.md`](AGENTS.md) 是写给编码助手看的：目录约定、环境变量、验证命令和失败处理都写成了可执行步骤，你可以直接让 Claude Code / Codex 照着装。人工部署照上面的三步走就行，两条路都完整。
 
-## Development checks
+## 它不做什么
+
+- 不是 CLIProxyAPI 的替代品或分发渠道——你得先自己装好 CLIProxyAPI。
+- 不代理、不改写、不记录你的模型请求内容。它只读日志和管理接口。
+- 不帮你注册账号、不绕过任何额度限制。
+- Windows 和 Docker 下没有服务控制与自动升级（依赖 systemd）。这一点在界面里会明确禁用，不会静默失败。
+
+## 常见问题
+
+**页面打开了但没数据。** 先确认 CLIProxyAPI 在跑，再检查 `.env` 里的 `CLIPROXY_PANEL_CLIPROXY_API_BASE` / `_PORT` 指向对不对。
+
+> 新版 CLIProxyAPI 已经不再提供旧的 usage 管理接口。CPA-X 不再后台轮询它——实时请求量来自增量日志解析，升级前已存下的 token / 成本历史仍可从本地兼容快照读取，不会反复向上游发 `404`。
+
+**健康检查超时。** 容器和负载均衡的存活探测请用不需要鉴权的 `/api/healthz`；`/api/health` 是完整诊断，比较重。
+
+**systemd 相关功能没反应。** 那是 Linux 专属能力，Windows 上会优雅失败，不影响面板启动。
+
+## 安全须知
+
+- **不要把 `.env` 提交进仓库**（已在 `.gitignore` 中）。管理密钥和模型密钥只放 `.env`。
+- 默认监听 `127.0.0.1`。任何非回环监听都必须同时设置至少 32 位的 `CLIPROXY_PANEL_PANEL_ACCESS_KEY`，否则进程拒绝启动。
+- 配了访问密钥后，`/api/*` 只接受 `X-Panel-Key` 请求头；浏览器首次配置走不会被传输的 `#panel_key=...` fragment，从不使用查询参数。
+- 公网部署请保持回环监听 + TLS 反向代理。
+
+## 开发
 
 ```bash
-python -m pip install --upgrade "pip>=26.1.2"
 python -m pip install -r requirements-dev.txt
 python -m pytest
 ruff check --select E9,F63,F7,F82 app.py scripts tests
 ```
 
-## Community
+## 更多文档
 
-- [Contributing guide](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
-- [Operations: architecture, upgrade, backup, restore, uninstall](OPERATIONS.md)
-- [Support](SUPPORT.md)
-- [Code of Conduct](CODE_OF_CONDUCT.md)
-- [Report an issue](https://github.com/ferretgeek/CPA-X/issues/new/choose)
-- [Discussions](https://github.com/ferretgeek/CPA-X/discussions)
+[部署与运维](OPERATIONS.md) · [版本变更](CHANGELOG.md) · [参与开发](CONTRIBUTING.md) · [安全策略](SECURITY.md) · [获取支持](SUPPORT.md) · [行为准则](CODE_OF_CONDUCT.md) · [提交问题](https://github.com/ferretgeek/cliproxyapi-dashboard/issues/new/choose) · [讨论区](https://github.com/ferretgeek/cliproxyapi-dashboard/discussions)
 
-## License
-MIT License (see `LICENSE`)
+## 许可与声明
+
+MIT License，见 [`LICENSE`](LICENSE)。
+
+这是独立的社区项目，与 OpenAI、Anthropic、Google 和 CLIProxyAPI 上游项目均无隶属、授权或背书关系，也不绕过任何额度限制。相关商标归其权利人所有。

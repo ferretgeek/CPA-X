@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: 使用帮助与讨论 / Help and discussions
-    url: https://github.com/ferretgeek/CPA-X/discussions
+    url: https://github.com/ferretgeek/cliproxyapi-dashboard/discussions
     about: 安装、配置和排障问题请优先在 Discussions 提问。
   - name: 下载最新版 / Download latest release
-    url: https://github.com/ferretgeek/CPA-X/releases/latest
+    url: https://github.com/ferretgeek/cliproxyapi-dashboard/releases/latest
     about: 提交问题前请先确认正在使用最新版。

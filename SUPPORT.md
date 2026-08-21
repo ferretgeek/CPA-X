@@ -2,13 +2,13 @@
 
 ## Usage questions / 使用问题
 
-Use [GitHub Discussions](https://github.com/ferretgeek/CPA-X/discussions) for installation help, configuration questions, deployment ideas, and general troubleshooting.
+Use [GitHub Discussions](https://github.com/ferretgeek/cliproxyapi-dashboard/discussions) for installation help, configuration questions, deployment ideas, and general troubleshooting.
 
 安装、配置、部署建议和一般排障问题请优先使用 GitHub Discussions。
 
 ## Confirmed bugs / 已确认缺陷
 
-Use the repository's structured [issue forms](https://github.com/ferretgeek/CPA-X/issues/new/choose). Before submitting:
+Use the repository's structured [issue forms](https://github.com/ferretgeek/cliproxyapi-dashboard/issues/new/choose). Before submitting:
 
 - Test the latest release.
 - Search existing issues.

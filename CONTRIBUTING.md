@@ -7,7 +7,7 @@ Thank you for improving CPA-X. Bug reports, documentation fixes, compatibility w
 ## Before opening an issue / 提交 Issue 前
 
 - Search existing issues and confirm the problem still exists on the latest release.
-- For usage questions, prefer [GitHub Discussions](https://github.com/ferretgeek/CPA-X/discussions).
+- For usage questions, prefer [GitHub Discussions](https://github.com/ferretgeek/cliproxyapi-dashboard/discussions).
 - Never paste API keys, management keys, tokens, `.env` contents, or unredacted logs.
 - Include the CPA-X version, operating system, Python version, deployment mode, CLIProxyAPI version, and configured log time-zone mode.
 
