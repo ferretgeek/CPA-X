@@ -1,26 +1,14 @@
-[![CPA-X 管理面板](docs/images/social-preview.png)](https://github.com/ferretgeek/cliproxyapi-dashboard/releases/latest)
-
-# CPA-X · CLIProxyAPI 管理面板
+# CLIProxyAPI 管理面板
 
 中文 · [English](README_EN.md)
 
-[![CI](https://github.com/ferretgeek/cliproxyapi-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/ferretgeek/cliproxyapi-dashboard/actions/workflows/ci.yml)
-[![最新版本](https://img.shields.io/github/v/release/ferretgeek/cliproxyapi-dashboard?display_name=tag&label=%E7%89%88%E6%9C%AC)](https://github.com/ferretgeek/cliproxyapi-dashboard/releases/latest)
-[![开源许可](https://img.shields.io/github/license/ferretgeek/cliproxyapi-dashboard?label=%E8%AE%B8%E5%8F%AF)](LICENSE)
+在浏览器里查看 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的运行状态和请求日志，并管理服务升级。CPA-X 是它的配套管理工具。
 
-> 一页看清：哪个账号还活着、token 花在了哪、这次升级到底成没成。
+**使用前提：** 已部署 CLIProxyAPI，需要 Python 3.11+ 和管理接口密钥。服务控制与自动升级需要 Linux + systemd；Windows、Docker 主要用于监控和查看。
 
-## 这是给谁的
+[开始安装](#三步跑起来) · [部署与运维](OPERATIONS.md) · [查看界面](#界面)
 
-[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 能把 Codex、Claude Code、Gemini CLI 的订阅变成标准 API 接口，很多人用它统一调度手上的几个账号。
-
-把它跑起来不难。难的是跑起来之后：
-
-- 请求突然开始失败，是哪个账号被限流了？
-- 这个月的 token 到底花在哪个模型、哪个账号上？折算成钱是多少？
-- 上游发了新版本，我升级了——服务现在还活着吗？如果没活，怎么退回去？
-
-CPA-X 就是回答这三个问题的。它读 CLIProxyAPI 自己的日志和管理接口，把状态、用量、成本、日志和升级收进一个页面；不接管你的流量，也不碰你的模型请求。
+实时请求数来自日志；Token 和成本数据来自已有的本地历史快照，新版 CLIProxyAPI 不再提供旧的用量接口。
 
 ## 界面
 
@@ -35,7 +23,7 @@ CPA-X 就是回答这三个问题的。它读 CLIProxyAPI 自己的日志和管�
 ## 它能做什么
 
 - **看状态** — 服务是否在跑、CPU / 内存 / 磁盘、上游版本与本地版本、各账号可用性。
-- **看用量和花费** — 实时请求量、按模型和账号拆分的 token 消耗，并按可配置的单价折算成本（默认可从 OpenRouter 自动同步价格，也可以关掉自己填）。
+- **看用量和花费** — 实时请求量来自日志；已有的 Token 消耗与成本历史从本地兼容快照读取，支持按模型和账号查看。估算单价可从 OpenRouter 自动同步，也可以关闭同步后手动填写。
 - **看日志** — 增量解析、按级别与关键字筛选，不用 SSH 进去 `tail`。
 - **管升级** — 检查新版本、下载、校验、替换、重启、健康确认，失败自动回滚。
 - **管服务** — Linux 上直接启停重启 systemd 服务（Windows 与 Docker 下这部分会明确禁用，而不是假装成功）。

@@ -1,26 +1,14 @@
-[![CPA-X admin dashboard](docs/images/social-preview.png)](https://github.com/ferretgeek/cliproxyapi-dashboard/releases/latest)
-
-# CPA-X · CLIProxyAPI admin dashboard
+# CLIProxyAPI dashboard
 
 [中文](README.md) · English
 
-[![CI](https://github.com/ferretgeek/cliproxyapi-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/ferretgeek/cliproxyapi-dashboard/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/ferretgeek/cliproxyapi-dashboard?display_name=tag)](https://github.com/ferretgeek/cliproxyapi-dashboard/releases/latest)
-[![License](https://img.shields.io/github/license/ferretgeek/cliproxyapi-dashboard)](LICENSE)
+View [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) service status and request logs in a browser, and manage service upgrades. CPA-X is a companion dashboard for an existing installation.
 
-> One page that tells you which account is alive, where your tokens went, and whether that upgrade actually worked.
+**Requirements:** An existing CLIProxyAPI installation, Python 3.11+, and its management key. Service control and auto-update require Linux with systemd; Windows and Docker mainly support monitoring and viewing.
 
-## Who this is for
+[Install](#running-it) · [Operations guide](OPERATIONS.md) · [Screenshots](#interface)
 
-[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) turns Codex, Claude Code, and Gemini CLI subscriptions into standard API endpoints, and many people use it to pool the accounts they already have.
-
-Getting it running is the easy part. Living with it is where the questions start:
-
-- Requests suddenly began failing — which account got rate-limited?
-- Where did this month's tokens actually go, by model and by account? What does that cost?
-- Upstream shipped a new version and I upgraded. Is the service still alive? If not, how do I get back?
-
-CPA-X exists to answer those three questions. It reads CLIProxyAPI's own logs and management API and puts status, usage, cost, logs, and upgrades on one page. It never sits in front of your traffic and never touches your model requests.
+Live request counts come from logs. Token and cost data come from existing local history snapshots; current CLIProxyAPI versions no longer provide the legacy usage API.
 
 ## Interface
 
@@ -35,7 +23,7 @@ CPA-X exists to answer those three questions. It reads CLIProxyAPI's own logs an
 ## What it does
 
 - **Status** — whether the service is up, CPU / memory / disk, upstream vs. local version, per-account availability.
-- **Usage and cost** — live request volume, token consumption broken down by model and account, converted to money using configurable pricing (defaults can auto-sync from OpenRouter, or you can turn that off and set your own).
+- **Usage and cost** — live request volume comes from logs. Existing token and cost history is read from local compatibility snapshots, with model and account breakdowns. Estimated pricing can auto-sync from OpenRouter or be entered manually with sync turned off.
 - **Logs** — incrementally parsed, filterable by level and keyword, so you don't SSH in to `tail`.
 - **Upgrades** — check, download, verify, replace, restart, health-confirm, and roll back on failure.
 - **Service control** — start, stop, and restart the systemd unit on Linux. Under Windows and Docker this is explicitly disabled rather than silently pretending to work.
